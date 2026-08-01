@@ -1,0 +1,24 @@
+# Object files
+*.o
+
+# Executables
+xsm
+spl/spl
+xfs-interface/xfs-interface
+xfs-interface/init
+xsm_dev/xsm
+xsm_dev/out
+
+# Generated lexer/parser
+lex.yy.c
+y.tab.c
+y.tab.h
+
+# Disk image
+*.xfs
+
+# Editor files
+*~
+*.swp
+.vscode/
+.idea/
