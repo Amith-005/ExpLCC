@@ -1,24 +1,41 @@
-# Object files
+# ===========================
+# C/C++ Build Artifacts
+# ===========================
 *.o
+*.a
+*.so
+*.out
 
+# ===========================
 # Executables
+# ===========================
 xsm
 spl/spl
 xfs-interface/xfs-interface
 xfs-interface/init
 xsm_dev/xsm
-xsm_dev/out
 
-# Generated lexer/parser
-lex.yy.c
-y.tab.c
-y.tab.h
 
-# Disk image
+# ===========================
+# Virtual Disk Images
+# ===========================
 *.xfs
 
-# Editor files
+# ===========================
+# Temporary Files
+# ===========================
 *~
 *.swp
+*.tmp
+
+# ===========================
+# IDE Files
+# ===========================
 .vscode/
 .idea/
+
+# ===========================
+# OS Files
+# ===========================
+.DS_Store
+Thumbs.db
