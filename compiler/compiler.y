@@ -2,9 +2,9 @@
 	#include <stdlib.h>
 	#include <stdio.h>
 	#include "compiler.h"
-	#include "compiler.c"
 
     extern FILE* yyin;
+	extern char* yytext;
 
     void yyerror(char const *s);
 	int yylex(void);
@@ -14,66 +14,87 @@
 	struct AST_Node *node;
 }
 
-%type <node> program stmt_list stmt expr _ID _NUM
-%token _PLUS _MINUS _MUL _DIV
-%token _BEGIN _END _READ _WRITE _ID _NUM
-%left _PLUS _MINUS
-%left _MUL _DIV
+%type <node> program stmt_list stmt expr InputStmt OutputStmt AsgStmt IfStmt WhileStmt RepeatUntilStmt DoWhileStmt
+%token PLUS_ MINUS_ MUL_ DIV_ LT_ GT_ LE_ GE_ NE_ EQ_
+%token BEGIN_ END_ READ_ WRITE_ IF_ THEN_ ELSE_ ENDIF_ WHILE_ DO_ ENDWHILE_ REPEAT_ UNTIL_
+%token <node> BREAK_ CONTINUE_ ID_ NUM_
+%left LT_ GT_ LE_ GE_ NE_ EQ_
+%left PLUS_ MINUS_
+%left MUL_ DIV_
 
 %%
 
-program : _BEGIN stmt_list _END ';' {
+program : BEGIN_ stmt_list END_ {
 								$$ = $2;
-								
-								FILE *fp = fopen("output.xsm", "w");
-								if (fp == NULL)
-								{
-									printf("Error opening file!\n");
-									exit(1);
-								}
 
+								FILE *fp = fopen("output.xsm", "w");
 								fprintf(fp, "0\n2056\n0\n0\n0\n0\n0\n0\n");
 								fprintf(fp, "MOV SP, 4122\n");
-
 								codeGen($2, fp);
-
 								fprintf(fp, "INT 10\n");
-
-								printf("Code Generated\n");
+								fclose(fp);
+								
 								exit(0);
 							}
-		| _BEGIN _END ';' {
+		| BEGIN_ END_ {
 			printf("Empty Program\n");
 			printf("Parsing Successful\n");
-			exit(0);
+			exit(1);
 		}
 
-stmt_list: stmt_list stmt ';' {$$ = makeStmtNode(STATEMENT, $1, $2, "STATEMENT");}
+stmt_list: stmt_list stmt ';' {$$ = makeNode(STATEMENT, VOID, $1, NULL, $2, "STATEMENT");}
 	| stmt ';' {$$ = $1;}
 
-stmt : _READ '(' _ID ')' { $$ = makeStmtNode(READ, $3, (struct AST_Node *)NULL, "READ");}
-    | _WRITE '(' expr ')' { $$ = makeStmtNode(WRITE, $3, (struct AST_Node *)NULL, "WRITE");}
-    | _ID '=' expr { $$ = makeExprNode(ASSIGNMENT, '=', $1, $3, "="); }
+stmt: InputStmt
+    | OutputStmt
+    | AsgStmt
+	| IfStmt
+	| WhileStmt
+	| RepeatUntilStmt
+	| DoWhileStmt
+	| BREAK_
+	| CONTINUE_
 	
-expr : expr _PLUS expr		{$$ = makeExprNode(PLUS, '+',$1, $3, "+");}
-	| expr _MINUS expr  	{$$ = makeExprNode(MINUS, '-',$1, $3, "-");}
-	| expr _MUL expr	{$$ = makeExprNode(MUL, '*',$1, $3, "*");}
-	| expr _DIV expr	{$$ = makeExprNode(DIV, '/',$1, $3, "/");}
-	| '(' expr ')' 	{$$ = $2;}
-	| _NUM		{$$ = $1;}
-	| _ID		{$$ = $1;}
+InputStmt: READ_ '(' ID_ ')' { $$ = makeNode(READ, VOID, $3, NULL, NULL, "READ");}
+
+OutputStmt: WRITE_ '(' expr ')' { $$ = makeNode(WRITE, VOID, $3, NULL, NULL, "WRITE");}
+
+AsgStmt: ID_ '=' expr { $$ = makeNode(OPERATOR, INTEGER, $1, NULL, $3, "="); }
+
+IfStmt: IF_ '(' expr ')' THEN_ stmt_list ELSE_ stmt_list ENDIF_ { $$ = makeNode(IF, VOID, $3, $6, $8, "IF");}
+    | IF_ '(' expr ')' THEN_ stmt_list ENDIF_ { $$ = makeNode(IF, VOID, $3, $6, NULL, "IF");}
+
+WhileStmt: WHILE_ '(' expr ')' DO_ stmt_list ENDWHILE_ { $$ = makeNode(WHILE, VOID, $3, NULL, $6, "WHILE");}
+
+RepeatUntilStmt: REPEAT_ stmt_list UNTIL_ '(' expr ')' { $$ = makeNode(REPEAT, VOID, $2, NULL, $5, "REPEAT"); }
+
+DoWhileStmt: DO_ stmt_list WHILE_ '(' expr ')' { $$ = makeNode(DOWHILE, VOID, $2, NULL, $5, "DOWHILE"); }
+
+expr : expr PLUS_ expr		{$$ = makeNode(OPERATOR, INTEGER, $1, NULL, $3, "+");}
+	| expr MINUS_ expr		{$$ = makeNode(OPERATOR, INTEGER, $1, NULL, $3, "-");}
+	| expr MUL_ expr		{$$ = makeNode(OPERATOR, INTEGER, $1, NULL, $3, "*");}
+	| expr DIV_ expr		{$$ = makeNode(OPERATOR, INTEGER, $1, NULL, $3, "/");}
+	| expr LT_ expr			{$$ = makeNode(OPERATOR, BOOLEAN, $1, NULL, $3, "<");}
+	| expr GT_ expr			{$$ = makeNode(OPERATOR, BOOLEAN, $1, NULL, $3, ">");}
+	| expr LE_ expr			{$$ = makeNode(OPERATOR, BOOLEAN, $1, NULL, $3, "<=");}
+	| expr GE_ expr			{$$ = makeNode(OPERATOR, BOOLEAN, $1, NULL, $3, ">=");}
+	| expr NE_ expr			{$$ = makeNode(OPERATOR, BOOLEAN, $1, NULL, $3, "!=");}
+	| expr EQ_ expr			{$$ = makeNode(OPERATOR, BOOLEAN, $1, NULL, $3, "==");}
+	| '(' expr ')' 			{$$ = $2;}
+	| NUM_					{$$ = $1;}
+	| ID_					{$$ = $1;}
 
 %%
 
 void yyerror(char const *s)
 {
-    printf("yyerror %s",s);
+    printf("yyerror %s: %s",s,yytext);
 }
 
 
-int main() 
+int main(void) 
 {
-    yyin=fopen("input.txt","r");
+    yyin = stdin;
 	yyparse();
 	
 	return 0;

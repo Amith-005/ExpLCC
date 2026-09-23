@@ -1,43 +1,56 @@
-#define STATEMENT 1
-#define EXPRESSION 2
-#define VARIABLE 3
-#define INPUT 4
-#define OUTPUT 5
-#define ASSIGNMENT 6
-#define PLUS 7
-#define MINUS 8
-#define MUL 9
-#define DIV 10
-#define CONSTANT 11
-#define INTEGER 12
-#define READ 13
-#define WRITE 14
+#ifndef EX_H
+#define EX_H
 
+#include <stdlib.h>
+#include <stdio.h>
+
+// Enumerations for Nodetype and Type
+typedef enum Nodetype
+{
+    VARIABLE,
+    CONSTANT,
+    READ,
+    WRITE,
+    STATEMENT,
+    OPERATOR,
+    WHILE,
+    IF,
+    BREAK,
+    CONTINUE,
+    REPEAT,
+    DOWHILE,
+} Nodetype;
+
+typedef enum Type
+{
+    INTEGER,
+    BOOLEAN,
+    VOID,
+} Type;
+
+// AST Node Structure
 typedef struct AST_Node
 {
-    int val;       // value of a number for NUM nodes.
-    int type;      // type of variable
-    char *varname; // name of a variable for ID nodes
-    int nodetype;
-    char op;                       // operator in case of operator node
-    char *s;                       // string representation of the node
-    struct AST_Node *left, *right; // left and right branches
+    int val;
+    Type type;
+    char *varname;
+    Nodetype nodetype;
+    char *s;
+    struct AST_Node *left, *mid, *right;
 } AST_Node;
 
-//------------------- AST Functions -------------------
-struct AST_Node *makeConstantNode(int, int, char *);
-struct AST_Node *makeVariableNode(int, char, char *);
-struct AST_Node *makeStmtNode(int, struct AST_Node *, struct AST_Node *, char *);
-struct AST_Node *makeExprNode(int, char, struct AST_Node *, struct AST_Node *, char *);
+// AST Node Creation Functions
+struct AST_Node *makeConstantLeafNode(Type, int, char *);
+struct AST_Node *makeVariableLeafNode(Type, char, char *);
+struct AST_Node *makeNode(Nodetype, Type, struct AST_Node *, struct AST_Node *, struct AST_Node *, char *);
 
-//------------------- Code Gen Functions -------------------
-int codeGen(struct AST_Node *, FILE *);
-void readCodeGen(struct AST_Node *, FILE *);
-void writeCodeGen(struct AST_Node *, FILE *);
-
-//------------------- Reg Functions -------------------
+// Utility Functions
+void printIndent(int, int);
+void print_tree(struct AST_Node *, int, int);
 int getReg();
 void freeReg();
-
-//------------------- Utility Functions -------------------
+int getLabel();
 int getAddr(char *);
+int codeGen(struct AST_Node *, FILE *);
+
+#endif // EX_H
