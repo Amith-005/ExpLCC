@@ -1,82 +1,80 @@
 %{
-#include <stdlib.h>
-#include <stdio.h>
-#include "compiler.h"
+	#include <stdlib.h>
+	#include <stdio.h>
+	#include "compiler.h"
+	#include "compiler.c"
 
-int yylex(void);
-void yyerror(const char *s);
-FILE *fptr;
+    extern FILE* yyin;
+
+    void yyerror(char const *s);
+	int yylex(void);
 %}
 
-%union {
-    tnode *node;
-    int integer;
+%union{
+	struct AST_Node *node;
 }
 
-%token <integer> NUM
-%type <node> expr
-%left '+' '-'
-%left '*' '/'
+%type <node> program stmt_list stmt expr _ID _NUM
+%token _PLUS _MINUS _MUL _DIV
+%token _BEGIN _END _READ _WRITE _ID _NUM
+%left _PLUS _MINUS
+%left _MUL _DIV
 
 %%
 
-start:
-      expr '\n' {
-          initializeRegs();
-          fptr = fopen("output.xsm", "w");
-          if (!fptr) {
-              perror("fopen");
-              exit(1);
-          }
+program : _BEGIN stmt_list _END ';' {
+								$$ = $2;
+								
+								FILE *fp = fopen("output.xsm", "w");
+								if (fp == NULL)
+								{
+									printf("Error opening file!\n");
+									exit(1);
+								}
 
-          fprintf(fptr, "0\n2056\n0\n0\n0\n0\n0\n0\n");
-          int resultReg = codeGen($1, fptr);
-          fprintf(fptr, "MOV [4096], R%d\n", resultReg);
-          fprintf(fptr, "MOV R0, [4096]\n");
-          fprintf(fptr, "MOV SP, 4095\n");
-          fprintf(fptr, "MOV R1, \"Write\"\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "MOV R1, -2\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "PUSH R0\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "CALL 0\n");
-          fprintf(fptr, "POP R0\n");
-          fprintf(fptr, "POP R1\n");
-          fprintf(fptr, "POP R1\n");
-          fprintf(fptr, "POP R1\n");
-          fprintf(fptr, "POP R1\n");
-          fprintf(fptr, "MOV R1, \"Exit\"\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "MOV R1, -2\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "PUSH R1\n");
-          fprintf(fptr, "BRKP\n");
-          fprintf(fptr, "CALL 0\n");
+								fprintf(fp, "0\n2056\n0\n0\n0\n0\n0\n0\n");
+								fprintf(fp, "MOV SP, 4122\n");
 
-          fclose(fptr);
-          exit(0);
-      }
-    ;
+								codeGen($2, fp);
 
-expr:
-      expr '+' expr { $$ = makeOperatorNode('+', $1, $3); }
-    | expr '-' expr { $$ = makeOperatorNode('-', $1, $3); }
-    | expr '*' expr { $$ = makeOperatorNode('*', $1, $3); }
-    | expr '/' expr { $$ = makeOperatorNode('/', $1, $3); }
-    | '(' expr ')'  { $$ = $2; }
-    | NUM           { $$ = makeLeafNode($1); }
-    ;
+								fprintf(fp, "INT 10\n");
+
+								printf("Code Generated\n");
+								exit(0);
+							}
+		| _BEGIN _END ';' {
+			printf("Empty Program\n");
+			printf("Parsing Successful\n");
+			exit(0);
+		}
+
+stmt_list: stmt_list stmt ';' {$$ = makeStmtNode(STATEMENT, $1, $2, "STATEMENT");}
+	| stmt ';' {$$ = $1;}
+
+stmt : _READ '(' _ID ')' { $$ = makeStmtNode(READ, $3, (struct AST_Node *)NULL, "READ");}
+    | _WRITE '(' expr ')' { $$ = makeStmtNode(WRITE, $3, (struct AST_Node *)NULL, "WRITE");}
+    | _ID '=' expr { $$ = makeExprNode(ASSIGNMENT, '=', $1, $3, "="); }
+	
+expr : expr _PLUS expr		{$$ = makeExprNode(PLUS, '+',$1, $3, "+");}
+	| expr _MINUS expr  	{$$ = makeExprNode(MINUS, '-',$1, $3, "-");}
+	| expr _MUL expr	{$$ = makeExprNode(MUL, '*',$1, $3, "*");}
+	| expr _DIV expr	{$$ = makeExprNode(DIV, '/',$1, $3, "/");}
+	| '(' expr ')' 	{$$ = $2;}
+	| _NUM		{$$ = $1;}
+	| _ID		{$$ = $1;}
 
 %%
 
-void yyerror(const char *s) {
-    fprintf(stderr, "yyerror: %s\n", s);
+void yyerror(char const *s)
+{
+    printf("yyerror %s",s);
 }
 
-int main(void) {
-    return yyparse();
+
+int main() 
+{
+    yyin=fopen("input.txt","r");
+	yyparse();
+	
+	return 0;
 }

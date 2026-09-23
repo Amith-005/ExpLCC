@@ -1,27 +1,35 @@
 %{
-#include <stdlib.h>
-#include <stdio.h>
-#include "compiler.h"
-#include "y.tab.h"
-int number;
+	#include <stdlib.h>
+	#include <stdio.h>
+	#include "y.tab.h"
+	#include "compiler.h"
+
+	int number;
+	char variable;
 %}
 
-DIGIT   [0-9]
-NUM     {DIGIT}+
+%%
+
+"begin" {return _BEGIN;}
+"end" {return _END;}
+"read" {return _READ;}
+"write" {return _WRITE;}
+[a-z] {variable = *yytext; yylval.node = makeVariableNode(INTEGER, variable, yytext); return _ID;}
+[0-9]+	{number = atoi(yytext); yylval.node = makeConstantNode(INTEGER, number, yytext); return _NUM;}
+"+" {return _PLUS;}
+"-" {return _MINUS;}
+"*" {return _MUL;}
+"/" {return _DIV;}
+"=" {return *yytext;}
+[\(\);] { return *yytext; }
+[ \t\n]	{}
+. {
+    yyerror("unknown character\n");
+    exit(1);
+}
 
 %%
 
-{NUM}      { number = atoi(yytext); yylval.integer = number; return NUM; }
-"+"        { return '+'; }
-"-"        { return '-'; }
-"*"        { return '*'; }
-"/"        { return '/'; }
-"("        { return '('; }
-")"        { return ')'; }
-[ \t]+     { }
-[\n]       { return '\n'; }
-.          { fprintf(stderr, "Unknown char: %s\n", yytext); exit(1); }
-
-%%
-
-int yywrap(void) { return 1; }
+int yywrap() {
+	return 1;
+}
