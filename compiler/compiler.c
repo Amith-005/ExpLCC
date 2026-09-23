@@ -1,760 +1,789 @@
 #include "compiler.h"
-#include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
 
+extern void yyerror(const char *s);
 
-GST_Node *Ghead = NULL;
-int binding = 4096;
-int SP;
+int reg_index = -1;
+int label_index = -1;
 
-typedef struct LoopNode {
-    int startLabel;
-    int endLabel;
-    struct LoopNode *next;
-} LoopNode;
+int break_labels[20];
+int continue_labels[20];
+int loop_top = -1;
 
-LoopNode *loopStack = NULL;
+/* Function currently being parsed (for return type checking) */
+Gsymbol* current_function = NULL;
+int current_return_type = INTEGER_TYPE;
 
-void loopStackPush(int start, int end) {
-    LoopNode *new_node = (LoopNode *)malloc(sizeof(LoopNode));
-    new_node->startLabel = start;
-    new_node->endLabel = end;
-    new_node->next = loopStack;
-    loopStack = new_node;
-}
-
-void loopStackPop() {
-    if (loopStack != NULL) {
-        LoopNode *temp = loopStack;
-        loopStack = loopStack->next;
-        free(temp);
-    }
-}
-
-int loopStackTopBreak() {
-    if (loopStack != NULL) {
-        return loopStack->endLabel;
-    }
-    printf("Error: BREAK statement outside loop.\n");
+void semanticError(const char* fmt, const char* name) {
+    char msg[200];
+    snprintf(msg, sizeof(msg), fmt, name);
+    yyerror(msg);
     exit(1);
-    return -1;
-}
-
-int loopStackTopContinue() {
-    if (loopStack != NULL) {
-        return loopStack->startLabel;
-    }
-    printf("Error: CONTINUE statement outside loop.\n");
-    exit(1);
-    return -1;
-}
-// -------------------------------------------------------------
-
-GST_Node *GSTLookup(char *name)
-{
-    GST_Node *temp = Ghead;
-    while (temp != NULL)
-    {
-        if (strcmp(temp->name, name) == 0)
-            return temp;
-        temp = temp->next;
-    }
-    return NULL;
-}
-
-GST_Node *GSTInstall(char *name, Type type, int size1, int size2, int dimensions, int ptr_type)
-{
-    if(GSTLookup(name)!=NULL){
-        printf("Var redeclared\n");
-        printf("The redeclared var is:%s\n",name);
-        exit(1);
-    }
-    GST_Node *new_node = (GST_Node *)malloc(sizeof(GST_Node));
-    new_node->name = strdup(name);
-    
-    // Set type based on whether it is a pointer or not
-    if (ptr_type == INTEGER && type == VOID) {
-        new_node->type = POINTER_TO_INTEGER;
-        new_node->ptr_type = INTEGER;
-    } else if (ptr_type == STRING && type == VOID) {
-        new_node->type = POINTER_TO_STRING;
-        new_node->ptr_type = STRING;
-    } else {
-        new_node->type = type;
-        new_node->ptr_type = type;
-    }
-
-    new_node->size = size1;
-    new_node->size2 = size2;
-    new_node->dimensions = dimensions;
-    new_node->binding = binding;
-
-    int total_size = size1 * size2;
-    if (dimensions == 1) total_size = size1;
-    if (dimensions == 0) total_size = 1;
-
-    binding += total_size;
-    new_node->next = NULL;
-
-    if (Ghead == NULL) {
-        Ghead = new_node;
-    } else {
-        GST_Node *temp = Ghead;
-        while (temp->next != NULL)
-            temp = temp->next;
-        temp->next = new_node;
-    }
-    SP = binding;
-    return new_node;
-}
-
-void GSTChangeType(AST_Node *root, Type type)
-{
-    if (root != NULL) {
-        if (root->nodetype == VARIABLE) {
-            GST_Node *temp = GSTLookup(root->varname);
-            if (temp != NULL) {
-                if (type == INTEGER && temp->type == VOID) {
-                    temp->type = POINTER_TO_INTEGER;
-                    temp->ptr_type = INTEGER;
-                } else if (type == STRING && temp->type == VOID) {
-                    temp->type = POINTER_TO_STRING;
-                    temp->ptr_type = STRING;
-                } else {
-                    temp->type = type;
-                    temp->ptr_type = type;
-                }
-                root->type = temp->type;
-            }
-        }
-        GSTChangeType(root->left, type);
-        GSTChangeType(root->right, type);
-    }
-}
-
-void GSTPrint()
-{
-    char *type_str;
-    char *array_str;
-    struct GST_Node *temp = Ghead;
-    printf("Name\tType\tSize\tArray\tBinding\n");
-    while (temp != NULL)
-    {
-        type_str = (char *)malloc(sizeof(char) * 12);
-        array_str = (char *)malloc(sizeof(char) * 4);
-
-        if (temp->type == INTEGER) strcpy(type_str, "int");
-        else if (temp->type == STRING) strcpy(type_str, "str");
-        else if (temp->type == POINTER_TO_INTEGER) strcpy(type_str, "int *");
-        else if (temp->type == POINTER_TO_STRING) strcpy(type_str, "str *");
-        else strcpy(type_str, "void");
-
-
-        if (temp->dimensions == 0) {
-            strcpy(array_str, "no");
-        }
-        else if (temp->dimensions == 1 || temp->dimensions == 2) {
-            strcpy(array_str, "yes");
-        }
-
-        int size_to_print = (temp->size2 != 0) ? (temp->size * temp->size2) : temp->size;
-
-        printf("%s\t%s\t%d\t%s\t%d\n", temp->name, type_str, size_to_print, array_str, temp->binding);
-            
-        free(type_str);
-        free(array_str);
-        temp = temp->next;
-    }
-}
-
-int getSP()
-{
-    return SP;
-}
-
-AST_Node *makeVariableLeafNode(char *varname, char *s)
-{
-    AST_Node *new_node = (AST_Node *)malloc(sizeof(AST_Node));
-    new_node->s = strdup(s);
-    new_node->nodetype = VARIABLE;
-    new_node->varname = strdup(varname);
-    new_node->GSTentry = GSTLookup(varname);
-    if (new_node->GSTentry)
-        new_node->type = new_node->GSTentry->type;
-    else
-        new_node->type = VOID; 
-    new_node->left = NULL;
-    new_node->right = NULL;
-    new_node->mid = NULL;
-    return new_node;
-}
-
-AST_Node *makeConstantLeafNode(Type type, int val, char *s)
-{
-    AST_Node *new_node = (AST_Node *)malloc(sizeof(AST_Node));
-    new_node->s = strdup(s);
-    new_node->nodetype = CONSTANT;
-    new_node->type = type;
-    new_node->val = val;
-    new_node->GSTentry = NULL;
-    new_node->left = NULL;
-    new_node->right = NULL;
-    new_node->mid = NULL;
-    new_node->varname = NULL;
-    return new_node;
-}
-
-struct AST_Node *makeArrayLeafNode(char *varname, struct AST_Node *l, char *s)
-{
-    struct AST_Node *new_node = (struct AST_Node *)malloc(sizeof(struct AST_Node));
-    new_node->s = strdup(s);
-    new_node->nodetype = ARRAY;
-    new_node->varname = strdup(varname);
-    new_node->GSTentry = GSTLookup(varname);
-    if (new_node->GSTentry)
-        new_node->type = new_node->GSTentry->type;
-    else {
-        printf("Error: Array name '%s' not found.\n", varname);
-        exit(1);
-    }
-    new_node->left = l;
-    new_node->right = (struct AST_Node *)NULL;
-    new_node->mid = (struct AST_Node *)NULL;
-    return new_node;
-}
-
-struct AST_Node *makeArray2DLeafNode(char *varname, struct AST_Node *row, struct AST_Node *col, char *s)
-{
-    struct AST_Node *new_node = (struct AST_Node *)malloc(sizeof(struct AST_Node));
-    new_node->s = strdup(s);
-    new_node->nodetype = ARRAY;
-    new_node->varname = strdup(varname);
-    new_node->GSTentry = GSTLookup(varname);
-    if (new_node->GSTentry)
-        new_node->type = new_node->GSTentry->type;
-    else {
-        printf("Error: 2D Array name '%s' not found.\n", varname);
-        exit(1);
-    }
-    new_node->left = row; 
-    new_node->mid = col;
-    new_node->right = NULL;
-    return new_node;
-}
-
-struct AST_Node *makePointerNode(Nodetype node_type, struct AST_Node *l, char *s)
-{
-    struct AST_Node *new_node = (struct AST_Node *)malloc(sizeof(struct AST_Node));
-    new_node->s = strdup(s);
-    new_node->nodetype = node_type;
-    new_node->left = l;
-    new_node->mid = NULL;
-    new_node->right = NULL;
-    new_node->GSTentry = NULL;
-    new_node->varname = NULL;
-
-    if (node_type == ADDRESS) { 
-        if (l->nodetype != VARIABLE && l->nodetype != ARRAY) {
-            printf("Error: Address-of operator '&' can only be applied to variables or arrays.\n");
-            exit(1);
-        }
-        
-        switch (l->type) {
-            case INTEGER:
-                new_node->type = POINTER_TO_INTEGER;
-                break;
-            case STRING:
-                new_node->type = POINTER_TO_STRING;
-                break;
-            case POINTER_TO_INTEGER: 
-                new_node->type = POINTER_TO_INTEGER;
-                break;
-            default:
-                printf("Error: Invalid type for address-of operator (Type %d).\n", l->type);
-                exit(1);
-        }
-    } else if (node_type == POINTER) { // *p
-        // Dereferencing a pointer gives the type it points to.
-        if (l->type == POINTER_TO_INTEGER) new_node->type = INTEGER;
-        else if (l->type == POINTER_TO_STRING) new_node->type = STRING;
-        else {
-            printf("Error: Dereference operator '*' can only be applied to a pointer variable (Got Type %d).\n", l->type);
-            exit(1);
-        }
-    }
-    return new_node;
-}
-
-
-AST_Node *makeNode(Nodetype node_type, Type type, AST_Node *l, AST_Node *m, AST_Node *r, char *s)
-{
-    AST_Node *new_node = (AST_Node *)malloc(sizeof(AST_Node));
-    
-    if (node_type == OPERATOR) {
-        if (strcmp(s, "=") == 0) {
-            if (l->nodetype != VARIABLE && l->nodetype != ARRAY && l->nodetype != POINTER) {
-                printf("Error: Left side of assignment must be an assignable variable, array element, or dereferenced pointer.\n");
-                exit(1);
-            }
-
-            int assignment_allowed = 0;
-            int r_is_array_name = (r->nodetype == VARIABLE && r->GSTentry && r->GSTentry->dimensions > 0);
-            
-            if (l->type == POINTER_TO_INTEGER && r_is_array_name && r->GSTentry->ptr_type == INTEGER) {
-                assignment_allowed = 1; 
-            }
-            else if (l->type == POINTER_TO_STRING && r_is_array_name && r->GSTentry->ptr_type == STRING) {
-                assignment_allowed = 1; 
-            }
-            else if (r->nodetype == ADDRESS) {
-                assignment_allowed = 1; 
-            }
-
-
-            if (!assignment_allowed) {
-                Type l_base_type = l->type;
-                Type r_base_type = r->type;
-
-                if (l_base_type == POINTER_TO_INTEGER || l_base_type == POINTER_TO_STRING) {
-                    l_base_type = INTEGER; 
-                }
-                if (r_base_type == POINTER_TO_INTEGER || r_base_type == POINTER_TO_STRING) {
-                    r_base_type = INTEGER;
-                }
-
-                if (l_base_type != r_base_type) { 
-                     printf("Error: Type mismatch in assignment. Expected type %d, got %d.\n", l->type, r->type);
-                     exit(1);
-                }
-            }
-        }
-        else if (l->type == POINTER_TO_INTEGER || r->type == POINTER_TO_INTEGER) {
-            if (strcmp(s, "+") == 0 || strcmp(s, "-") == 0) {
-                if (!((l->type == POINTER_TO_INTEGER && r->type == INTEGER) || (l->type == INTEGER && r->type == POINTER_TO_INTEGER))) {
-                     printf("Error: Invalid pointer arithmetic. Only pointer +/- integer is allowed.\n");
-                     exit(1);
-                }
-                
-                if (l->type == POINTER_TO_INTEGER || r->type == POINTER_TO_INTEGER) {
-                    type = POINTER_TO_INTEGER;
-                }
-                
-            } else {
-                 printf("Error: Invalid operator '%s' for pointer or address types.\n", s);
-                 exit(1);
-            }
-        }
-        else if (type == INTEGER) {
-            if (l->type != INTEGER || r->type != INTEGER) {
-                printf("Error: Type mismatch. Arithmetic operator requires integer operands.\n");
-                exit(1);
-            }
-        }
-        else if (type == BOOLEAN) {
-            if (l->type != r->type) {
-                printf("Error: Type mismatch. Relational operator requires compatible operands.\n");
-                exit(1);
-            }
-        }
-    }
-
-    if (node_type == WHILE || node_type == IF || node_type == REPEAT || node_type == DOWHILE) {
-        AST_Node *condition = (node_type == IF) ? l : r; 
-        if (node_type == WHILE || node_type == IF) condition = l;
-        else if (node_type == REPEAT || node_type == DOWHILE) condition = r; 
-
-        if (condition->type != BOOLEAN) {
-            printf("Error: Type mismatch. Condition for loop/IF must be BOOLEAN.\n");
-            exit(1);
-        }
-    }
-
-    new_node->s = strdup(s);
-    new_node->nodetype = node_type;
-    new_node->type = type;
-    new_node->left = l;
-    new_node->mid = m;
-    new_node->right = r;
-    new_node->GSTentry = NULL;
-    new_node->varname = NULL;
-    return new_node;
-}
-
-struct AST_Node *ASTChangeType(struct AST_Node *root, Type type)
-{
-    if (root != NULL)
-    {
-        if(root->left) root->left = ASTChangeType(root->left, type);
-        if(root->right) root->right = ASTChangeType(root->right, type);
-
-        if (root->nodetype == VARIABLE)
-        {
-            GSTChangeType(root, type);
-        }
-    }
-    return root;
-}
-
-void printIndent(int depth, int isRight) {
-    for (int i = 0; i < depth - 1; i++) {
-        printf("|   ");
-    }
-    if (depth > 0) {
-        printf(isRight ? "└─ " : "├─ ");
-    }
-}
-
-void print_tree(AST_Node *root, int lvl, int isRight)
-{
-    if (root == NULL) return;
-    printIndent(lvl, isRight);
-    printf("%s", root->s);
-
-    if (root->nodetype == VARIABLE && root->GSTentry) {
-        printf(" (Binding: %d)", root->GSTentry->binding);
-    }
-    printf("\n");
-
-    if (root->left != NULL)
-        print_tree(root->left, lvl + 1, 0);
-    if (root->mid != NULL)
-        print_tree(root->mid, lvl + 1, 1);
-    if (root->right != NULL)
-        print_tree(root->right, lvl + 1, 1);
-}
-
-
-int free_reg = -1;
-int label = 0;
-
-int getReg() {
-    if (free_reg >= 19) { 
-        printf("Error: Out of registers.\n");
-        exit(1);
-    }
-    free_reg++;
-    return free_reg;
-}
-
-void freeReg() {
-    if (free_reg >= 0) {
-        free_reg--;
-    }
 }
 
 int getLabel() {
-    return label++;
+    label_index++;
+    return label_index;
 }
 
-int getAddr(AST_Node *t) {
-    if (t->GSTentry != NULL) {
-        return t->GSTentry->binding;
+int getReg() {
+    if(reg_index < 19) {
+        reg_index++;
+        return reg_index;
     }
-    return -1;
+    printf("No registers available\n");
+    exit(1);
 }
 
-int codeGen(AST_Node *t, FILE *target_file)
-{
-    int p, q, r, s, addr;
-
-    if (t == NULL) return -1;
-
-    if (t->nodetype == CONSTANT) {
-        p = getReg();
-        if (t->type == INTEGER) {
-            fprintf(target_file, "MOV R%d, %d\n", p, t->val);
-        } else if (t->type == STRING) {
-            fprintf(target_file, "MOV R%d, %s\n", p, t->s);
-        }
-        return p;
+void freeReg() {
+    if(reg_index >= 0) {
+        reg_index--;
     }
-    
-    if (t->nodetype == ADDRESS) { 
-        p = getReg();
-        if (t->left->nodetype == VARIABLE) {
-            addr = getAddr(t->left);
-            fprintf(target_file, "MOV R%d, %d\n", p, addr);
-        } else if (t->left->nodetype == ARRAY) {
-            if (t->left->GSTentry->dimensions == 1) { // 1D array
-                addr = getAddr(t->left);
-                q = codeGen(t->left->left, target_file); // Index in Rq
-                fprintf(target_file, "MOV R%d, %d\n", p, addr); // Base address in Rp
-                fprintf(target_file, "ADD R%d, R%d\n", p, q); // Rp = Base + Index
-                freeReg();
-            } else if (t->left->GSTentry->dimensions == 2) { 
-                 printf("Error: Address-of not fully supported for 2D array elements.\n");
-                 exit(1);
+}
+
+void setCurrentFunction(Gsymbol* f, int returnType) {
+    current_function = f;
+    current_return_type = returnType;
+}
+
+int getCurrentReturnType() {
+    return current_return_type;
+}
+
+int pointerTo(int base_type) {
+    if(base_type == INTEGER_TYPE) return INTEGER_POINTER_TYPE;
+    if(base_type == STRING_TYPE) return STRING_POINTER_TYPE;
+    if(isTupleType(base_type)) return TUPLE_PTR_BASE + (base_type - TUPLE_BASE);
+    yyerror("invalid pointer base type");
+    exit(1);
+}
+
+static int isArrayType(int type) {
+    return type == INTEGER_ARRAY_TYPE || type == STRING_ARRAY_TYPE;
+}
+
+static int isPointerType(int type) {
+    return type == INTEGER_POINTER_TYPE || type == STRING_POINTER_TYPE || isTuplePtrType(type);
+}
+
+/* Static scratch area where a tuple returned by a function is copied right after the call.
+   The caller consumes it immediately (assignment / argument push / return), with no call in between. */
+int tuple_scratch = -1;
+
+void allocTupleScratch() {
+    int size = maxTupleSize();
+    if(size > 0) {
+        Install("__tuple_ret", INTEGER_ARRAY_TYPE, size, NULL);
+        tuple_scratch = Lookup("__tuple_ret")->binding;
+    }
+}
+
+tnode* makeFieldNode(tnode* base, char* fname) {
+    if(!isTupleType(base->type)) {
+        if(isTuplePtrType(base->type)) semanticError("use -> to access field %s through a tuple pointer", fname);
+        semanticError("field access .%s on a non-tuple value", fname);
+    }
+    Typetable* t = TLookupByCode(base->type);
+    Fieldlist* f = FLookup(t, fname);
+    if(f == NULL) {
+        char msg[200];
+        snprintf(msg, sizeof(msg), "tuple %s has no field named %s", t->name, fname);
+        yyerror(msg);
+        exit(1);
+    }
+    tnode* node = createNode(f->offset, f->type, FIELD_NODE, fname, base, NULL, NULL);
+    return node;
+}
+
+tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnode *r, tnode* m) {
+    tnode* newNode = (tnode*)malloc(sizeof(tnode));
+    newNode->val = val;
+    newNode->left = l;
+    newNode->right = r;
+    newNode->mid = m;
+    newNode->type = type;
+    newNode->varname = varname != NULL ? strdup(varname) : NULL;
+    newNode->nodetype = nodetype;
+    newNode->Gentry = NULL;
+    newNode->Lentry = NULL;
+
+    switch(nodetype) {
+        case PLUS_NODE: case MINUS_NODE: case MUL_NODE: case DIV_NODE: case MODULUS_NODE:
+            if(l->type != INTEGER_TYPE || r->type != INTEGER_TYPE) {
+                yyerror("type mismatch: arithmetic operands must be integers");
+                exit(1);
             }
-        }
-        return p;
+            newNode->type = INTEGER_TYPE;
+            break;
+
+        case LT_NODE: case GT_NODE: case LE_NODE: case GE_NODE: case EQ_NODE: case NE_NODE:
+            if(l->type != r->type || isArrayType(l->type) || l->type == BOOLEAN_TYPE || isTupleType(l->type)) {
+                yyerror("type mismatch in comparison");
+                exit(1);
+            }
+            newNode->type = BOOLEAN_TYPE;
+            break;
+
+        case AND_NODE: case OR_NODE:
+            if(l->type != BOOLEAN_TYPE || r->type != BOOLEAN_TYPE) {
+                yyerror("type mismatch: logical operands must be boolean");
+                exit(1);
+            }
+            newNode->type = BOOLEAN_TYPE;
+            break;
+
+        case NOT_NODE:
+            if(l->type != BOOLEAN_TYPE) {
+                yyerror("type mismatch: operand of not must be boolean");
+                exit(1);
+            }
+            newNode->type = BOOLEAN_TYPE;
+            break;
+
+        case IF_NODE: case WHILE_NODE: case DO_WHILE_NODE: case REPEAT_UNTIL_NODE:
+            if(l->type != BOOLEAN_TYPE) {
+                yyerror("type mismatch: condition must be boolean");
+                exit(1);
+            }
+            break;
+
+        case DEREF_NODE:
+            if(l->type == INTEGER_POINTER_TYPE) newNode->type = INTEGER_TYPE;
+            else if(l->type == STRING_POINTER_TYPE) newNode->type = STRING_TYPE;
+            else if(isTuplePtrType(l->type)) newNode->type = TUPLE_BASE + (l->type - TUPLE_PTR_BASE);
+            else {
+                yyerror("type mismatch: dereferencing a non-pointer");
+                exit(1);
+            }
+            break;
+
+        case ADDRESS_NODE:
+            if((l->nodetype != VARIABLE && l->nodetype != FIELD_NODE) ||
+               (l->type != INTEGER_TYPE && l->type != STRING_TYPE && !isTupleType(l->type))) {
+                yyerror("& can only be applied to an int/str/tuple variable or field");
+                exit(1);
+            }
+            newNode->type = pointerTo(l->type);
+            break;
+
+        case ASSIGNMENT:
+            if(isArrayType(l->type)) {
+                yyerror("cannot assign value directly to an array name");
+                exit(1);
+            }
+            if(l->type != r->type) {
+                yyerror("type mismatch in assignment");
+                exit(1);
+            }
+            break;
+
+        case WRITE_NODE:
+            if(l->type != INTEGER_TYPE && l->type != STRING_TYPE && !isPointerType(l->type)) {
+                yyerror("write expects an int or str expression");
+                exit(1);
+            }
+            break;
+
+        case READ_NODE:
+            if(l->type != INTEGER_TYPE && l->type != STRING_TYPE) {
+                yyerror("read expects an int or str variable");
+                exit(1);
+            }
+            break;
+
+        case RETURN_NODE:
+            if(l->type != current_return_type) {
+                yyerror("type mismatch: return type does not match function type");
+                exit(1);
+            }
+            break;
     }
 
-    if (t->nodetype == VARIABLE) {
-        p = getReg();
-        addr = getAddr(t);
+    return newNode;
+}
 
-        if (t->GSTentry && t->GSTentry->dimensions > 0) {
-            fprintf(target_file, "MOV R%d, %d\n", p, addr);
-            return p;
-        }
+/* Look up the local symbol table first, then the global symbol table */
+tnode* makeVarNode(char* name, tnode* index1, tnode* index2) {
+    tnode* node = createNode(0, INTEGER_TYPE, VARIABLE, name, index1, index2, NULL);
 
-        if (t->type == POINTER_TO_INTEGER || t->type == POINTER_TO_STRING) {
-            fprintf(target_file, "MOV R%d, [%d]\n", p, addr); 
+    Lsymbol* L = LLookup(name);
+    if(L != NULL) {
+        if(index1 != NULL) semanticError("%s is not an array", name);
+        node->Lentry = L;
+        node->type = L->type;
+        return node;
+    }
+
+    Gsymbol* G = Lookup(name);
+    if(G == NULL) semanticError("undeclared variable %s", name);
+    if(G->isFunction) semanticError("%s is a function, not a variable", name);
+    node->Gentry = G;
+
+    if(isArrayType(G->type)) {
+        if(index1 == NULL) {
+            node->type = G->type;      // bare array name
         } else {
-            fprintf(target_file, "MOV R%d, [%d]\n", p, addr); 
+            if(index1->type != INTEGER_TYPE || (index2 && index2->type != INTEGER_TYPE)) {
+                semanticError("array index of %s must be an integer", name);
+            }
+            node->type = (G->type == INTEGER_ARRAY_TYPE) ? INTEGER_TYPE : STRING_TYPE;
         }
-        return p;
+    } else {
+        if(index1 != NULL) semanticError("%s is not an array", name);
+        node->type = G->type;
     }
-    
-    if (t->nodetype == POINTER) { 
-        p = codeGen(t->left, target_file); 
-        fprintf(target_file, "MOV R%d, [R%d]\n", p, p);
-        return p;
+    return node;
+}
+
+tnode* makeCallNode(char* name, tnode* args) {
+    Gsymbol* G = Lookup(name);
+    if(G == NULL || !G->isFunction) semanticError("call to undeclared function %s", name);
+
+    /* check number and types of arguments against the declaration */
+    Paramstruct* p = G->paramlist;
+    tnode* a = args;
+    while(p != NULL && a != NULL) {
+        if(p->type != a->left->type) semanticError("type mismatch in argument to %s", name);
+        p = p->next;
+        a = a->right;
     }
+    if(p != NULL || a != NULL) semanticError("wrong number of arguments in call to %s", name);
 
-    if (t->nodetype == READ) {
-        int addr_reg = getReg();
-        int q = getReg();
-        
-        if (t->left->nodetype == ARRAY) {
-             addr = getAddr(t->left);
-             if (t->left->GSTentry->dimensions == 2) {
-                 int row_reg = codeGen(t->left->left, target_file);
-                 int col_reg = codeGen(t->left->mid, target_file);
-                 int dim_reg = getReg();
-                 fprintf(target_file, "MOV R%d, %d\n", dim_reg, t->left->GSTentry->size2);
-                 fprintf(target_file, "MUL R%d, R%d\n", row_reg, dim_reg);
-                 fprintf(target_file, "ADD R%d, R%d\n", row_reg, col_reg);
-                 fprintf(target_file, "MOV R%d, %d\n", addr_reg, addr);
-                 fprintf(target_file, "ADD R%d, R%d\n", addr_reg, row_reg);
-                 freeReg(); freeReg(); freeReg();
-             } else { // 1D array
-                 int index_reg = codeGen(t->left->left, target_file);
-                 fprintf(target_file, "MOV R%d, %d\n", addr_reg, addr);
-                 fprintf(target_file, "ADD R%d, R%d\n", addr_reg, index_reg);
-                 freeReg();
-             }
-        } else if (t->left->nodetype == POINTER) {
-            addr_reg = codeGen(t->left->left, target_file);
-        } else { // Simple variable
-             addr = getAddr(t->left);
-             fprintf(target_file, "MOV R%d, %d\n", addr_reg, addr);
-        }
+    tnode* node = createNode(0, G->type, FUNC_CALL_NODE, name, args, NULL, NULL);
+    node->Gentry = G;
+    return node;
+}
 
-        fprintf(target_file, "MOV R%d, \"Read\"\n", q);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "MOV R%d, -1\n", q);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "PUSH R%d\n", addr_reg); 
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "CALL 0\n");
-        fprintf(target_file, "POP R%d\nPOP R%d\nPOP R%d\nPOP R%d\nPOP R%d\n", q,q,q,q,q);
-        freeReg(); freeReg();
-        return -1;
+/* Computes the memory address of a variable (or array element) into a register */
+int getVarAddressReg(tnode *varNode, FILE *target_file) {
+    int addr_reg = getReg();
+
+    // Local variable / parameter: address = BP + binding
+    if(varNode->Lentry != NULL) {
+        int b = varNode->Lentry->binding;
+        fprintf(target_file, "MOV R%d, BP\n", addr_reg);
+        if(b >= 0) fprintf(target_file, "ADD R%d, %d\n", addr_reg, b);
+        else fprintf(target_file, "SUB R%d, %d\n", addr_reg, -b);
+        return addr_reg;
     }
 
-    if (t->nodetype == WRITE) {
-        p = codeGen(t->left, target_file);
-        q = getReg();
-        
-        fprintf(target_file, "MOV R%d, \"Write\"\n", q);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "MOV R%d, -2\n", q);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "PUSH R%d\n", p);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "PUSH R%d\n", q);
-        fprintf(target_file, "CALL 0\n");
-        fprintf(target_file, "POP R%d\nPOP R%d\nPOP R%d\nPOP R%d\nPOP R%d\n", q,q,q,q,q);
-        freeReg(); 
+    int base_addr = varNode->Gentry->binding;
+    fprintf(target_file, "MOV R%d, %d\n", addr_reg, base_addr);
+
+    // 1D Array: index = left
+    if(varNode->left != NULL && varNode->right == NULL) {
+        int off_reg = codeGen(varNode->left, target_file);
+        fprintf(target_file, "ADD R%d, R%d\n", addr_reg, off_reg);
         freeReg();
-        return -1;
     }
 
+    // 2D Array
+    else if(varNode->left != NULL && varNode->right != NULL) {
+        int r_idx = codeGen(varNode->left, target_file);
+        int c_idx = codeGen(varNode->right, target_file);
+        int cols = varNode->Gentry->metadata[1];
+
+        fprintf(target_file, "MUL R%d, %d\n", r_idx, cols);
+        fprintf(target_file, "ADD R%d, R%d\n", r_idx, c_idx);
+        fprintf(target_file, "ADD R%d, R%d\n", addr_reg, r_idx);
+
+        freeReg();
+        freeReg();
+    }
+
+    return addr_reg;
+}
+
+int genTupleAddr(tnode* e, FILE* target_file);
+int genFunctionCall(tnode* t, FILE* target_file);
+
+/* Address of a tuple field = address of the tuple + field offset */
+int getFieldAddressReg(tnode* field, FILE* target_file) {
+    int r = genTupleAddr(field->left, target_file);
+    if(field->val != 0) fprintf(target_file, "ADD R%d, %d\n", r, field->val);
+    return r;
+}
+
+/* Address of anything that can be assigned to / read into / have its address taken */
+int getLValueAddr(tnode* node, FILE* target_file) {
+    if(node->nodetype == FIELD_NODE) return getFieldAddressReg(node, target_file);
+    if(node->nodetype == DEREF_NODE) return codeGen(node->left, target_file);
+    return getVarAddressReg(node, target_file);
+}
+
+/* Base address of a tuple-valued expression */
+int genTupleAddr(tnode* e, FILE* target_file) {
+    if(e->nodetype == FUNC_CALL_NODE) return genFunctionCall(e, target_file);  // address of the scratch copy
+    return getLValueAddr(e, target_file);
+}
+
+/* Copy n words from [src] to [dst]; both registers are clobbered */
+void copyWords(int dst, int src, int n, FILE* target_file) {
+    int t = getReg();
+    int k;
+    for(k = 0; k < n; k++) {
+        fprintf(target_file, "MOV R%d, [R%d]\n", t, src);
+        fprintf(target_file, "MOV [R%d], R%d\n", dst, t);
+        if(k < n - 1) {
+            fprintf(target_file, "ADD R%d, 1\n", src);
+            fprintf(target_file, "ADD R%d, 1\n", dst);
+        }
+    }
+    freeReg();
+}
+
+/* Push arguments in reverse order: the last argument is pushed first,
+   so that argument 1 ends up at [BP-3], argument 2 at [BP-4], ...
+   A tuple argument is passed by value: its words are pushed first field first. */
+void pushArgs(tnode* arg, FILE* target_file) {
+    if(arg == NULL) return;
+    pushArgs(arg->right, target_file);
+    tnode* e = arg->left;
+    if(isTupleType(e->type)) {
+        int size = typeSize(e->type);
+        int a = genTupleAddr(e, target_file);
+        int t = getReg();
+        int k;
+        for(k = 0; k < size; k++) {
+            fprintf(target_file, "MOV R%d, [R%d]\n", t, a);
+            fprintf(target_file, "PUSH R%d\n", t);
+            if(k < size - 1) fprintf(target_file, "ADD R%d, 1\n", a);
+        }
+        freeReg();
+        freeReg();
+        return;
+    }
+    int r = codeGen(e, target_file);
+    fprintf(target_file, "PUSH R%d\n", r);
+    freeReg();
+}
+
+/* Number of words the arguments of f occupy on the stack */
+static int argWords(Gsymbol* f) {
+    int n = 0;
+    Paramstruct* p = f->paramlist;
+    while(p != NULL) {
+        n += typeSize(p->type);
+        p = p->next;
+    }
+    return n;
+}
+
+int genFunctionCall(tnode* t, FILE* target_file) {
+    int saved = reg_index;
+    int i;
+
+    // 1. caller saves registers in use
+    for(i = 0; i <= saved; i++) {
+        fprintf(target_file, "PUSH R%d\n", i);
+    }
+
+    // 2. evaluate and push arguments
+    pushArgs(t->left, target_file);
+
+    // 3. push space for the return value (a tuple needs typeSize words)
+    int retsize = typeSize(t->Gentry->type);
+    int tmp = getReg();
+    for(i = 0; i < retsize; i++) {
+        fprintf(target_file, "PUSH R%d\n", tmp);
+    }
+    freeReg();
+
+    // 4. call
+    fprintf(target_file, "CALL F%d\n", t->Gentry->flabel);
+
+    // 5. after return: fetch return value into a fresh register
+    int ret_reg = getReg();
+    if(isTupleType(t->Gentry->type)) {
+        // pop the returned tuple (last field on top) into the scratch area; ret_reg = its address
+        tmp = getReg();
+        fprintf(target_file, "MOV R%d, %d\n", ret_reg, tuple_scratch + retsize - 1);
+        for(i = 0; i < retsize; i++) {
+            fprintf(target_file, "POP R%d\n", tmp);
+            fprintf(target_file, "MOV [R%d], R%d\n", ret_reg, tmp);
+            if(i < retsize - 1) fprintf(target_file, "SUB R%d, 1\n", ret_reg);
+        }
+        freeReg();
+    } else {
+        fprintf(target_file, "POP R%d\n", ret_reg);
+    }
+
+    // 6. pop the arguments
+    int nargs = argWords(t->Gentry);
+    if(nargs > 0) {
+        tmp = getReg();
+        for(i = 0; i < nargs; i++) {
+            fprintf(target_file, "POP R%d\n", tmp);
+        }
+        freeReg();
+    }
+
+    // 7. restore saved registers
+    for(i = saved; i >= 0; i--) {
+        fprintf(target_file, "POP R%d\n", i);
+    }
+
+    return ret_reg;
+}
+
+void genReturnSequence(FILE* target_file) {
+    fprintf(target_file, "MOV SP, BP\n");
+    fprintf(target_file, "POP BP\n");
+    fprintf(target_file, "RET\n");
+}
+
+int codeGen(tnode *t, FILE *target_file) {
+    if (t == NULL) return -1;
     if (t->nodetype == STATEMENT) {
         codeGen(t->left, target_file);
         codeGen(t->right, target_file);
         return -1;
     }
 
-    if (t->nodetype == OPERATOR) {
-        if (t->type == BOOLEAN) {
-            p = codeGen(t->left, target_file);
-            q = codeGen(t->right, target_file);
-            if (strcmp(t->s, ">") == 0) fprintf(target_file, "GT R%d, R%d\n", p, q);
-            else if (strcmp(t->s, "<") == 0) fprintf(target_file, "LT R%d, R%d\n", p, q);
-            else if (strcmp(t->s, ">=") == 0) fprintf(target_file, "GE R%d, R%d\n", p, q);
-            else if (strcmp(t->s, "<=") == 0) fprintf(target_file, "LE R%d, R%d\n", p, q);
-            else if (strcmp(t->s, "==") == 0) fprintf(target_file, "EQ R%d, R%d\n", p, q);
-            else if (strcmp(t->s, "!=") == 0) fprintf(target_file, "NE R%d, R%d\n", p, q);
-            freeReg();
-            return p;
-        }
-
-        if (strcmp(t->s, "=") == 0) {  
-            int rhs = codeGen(t->right, target_file);
-            
-            if (t->left->nodetype == ARRAY) {
-                addr = getAddr(t->left);
-                p = getReg();
-                if (t->left->GSTentry->dimensions == 2) {
-                    int row_reg = codeGen(t->left->left, target_file);
-                    int col_reg = codeGen(t->left->mid, target_file);
-                    int dim_reg = getReg();
-                    fprintf(target_file, "MOV R%d, %d\n", dim_reg, t->left->GSTentry->size2);
-                    fprintf(target_file, "MUL R%d, R%d\n", row_reg, dim_reg);
-                    fprintf(target_file, "ADD R%d, R%d\n", row_reg, col_reg);
-                    fprintf(target_file, "MOV R%d, %d\n", p, addr);
-                    fprintf(target_file, "ADD R%d, R%d\n", p, row_reg); 
-                    freeReg(); freeReg(); freeReg();
-                } else { // 1D array
-                    int index_reg = codeGen(t->left->left, target_file);
-                    fprintf(target_file, "MOV R%d, %d\n", p, addr);
-                    fprintf(target_file, "ADD R%d, R%d\n", p, index_reg); 
-                    freeReg();
-                }
-                fprintf(target_file, "MOV [R%d], R%d\n", p, rhs);
-                freeReg();
-                freeReg();
-            } else if (t->left->nodetype == POINTER) { 
-                p = codeGen(t->left->left, target_file); 
-                fprintf(target_file, "MOV [R%d], R%d\n", p, rhs); 
-                freeReg();
-                freeReg();
-            } else if (t->left->nodetype == VARIABLE) {
-                 addr = getAddr(t->left);
-                 fprintf(target_file, "MOV [%d], R%d\n", addr, rhs);
-                 freeReg();
-            } else {
-                 printf("Error: Invalid L-value in assignment.\n");
-                 exit(1);
-            }
-            return -1;
-        } else {
-            p = codeGen(t->left, target_file);
-            q = codeGen(t->right, target_file);
-
-            if (t->left->type == POINTER_TO_INTEGER || t->right->type == POINTER_TO_INTEGER) {
-                if (t->left->type == POINTER_TO_INTEGER) { 
-                    if (strcmp(t->s, "+") == 0) fprintf(target_file, "ADD R%d, R%d\n", p, q);
-                    else if (strcmp(t->s, "-") == 0) fprintf(target_file, "SUB R%d, R%d\n", p, q);
-                } else { // I + P (I is Rp, P is Rq)
-                    if (strcmp(t->s, "+") == 0) fprintf(target_file, "ADD R%d, R%d\n", q, p);
-                    else {
-                         printf("Error: Cannot subtract a pointer from an integer.\n");
-                         exit(1);
-                    }
-                    p = q; 
-                }
-            } else { // Standard Arithmetic
-                switch (t->s[0]) {
-                    case '+': fprintf(target_file, "ADD R%d, R%d\n", p, q); break;
-                    case '-': fprintf(target_file, "SUB R%d, R%d\n", p, q); break;
-                    case '*': fprintf(target_file, "MUL R%d, R%d\n", p, q); break;
-                    case '/': fprintf(target_file, "DIV R%d, R%d\n", p, q); break;
-                }
-            }
-            freeReg();
-            return p;
-        }
+    if (t->nodetype == CONSTANT) {
+        int r = getReg();
+        fprintf(target_file, "MOV R%d, %d\n", r, t->val);
+        return r;
     }
 
-    if (t->nodetype == WHILE) {
-        int start = getLabel(), end = getLabel();
-        loopStackPush(start, end);
-        fprintf(target_file, "L%d:\n", start);
-        p = codeGen(t->left, target_file);
-        fprintf(target_file, "JZ R%d, L%d\n", p, end);
+    if(t->nodetype == DEREF_NODE) {
+        int reg = codeGen(t->left, target_file);
+        fprintf(target_file, "MOV R%d, [R%d]\n", reg, reg);
+        return reg;
+    }
+
+    if(t->nodetype == ADDRESS_NODE) {
+        return getLValueAddr(t->left, target_file);
+    }
+
+    if(t->nodetype == FIELD_NODE) {
+        int r = getFieldAddressReg(t, target_file);
+        fprintf(target_file, "MOV R%d, [R%d]\n", r, r);
+        return r;
+    }
+
+    if (t->nodetype == VARIABLE) {
+        int r = getReg();
+        int addr_reg = getVarAddressReg(t, target_file);
+        fprintf(target_file, "MOV R%d, [R%d]\n", r, addr_reg);
+        freeReg(); // free addr_reg
+        return r;
+    }
+
+    if(t->nodetype == FUNC_CALL_NODE) {
+        return genFunctionCall(t, target_file);
+    }
+
+    if(t->nodetype == RETURN_NODE && isTupleType(t->left->type)) {
+        // copy the tuple into the return slot [BP-size-1 .. BP-2]
+        int size = typeSize(t->left->type);
+        int src = genTupleAddr(t->left, target_file);
+        int dst = getReg();
+        fprintf(target_file, "MOV R%d, BP\n", dst);
+        fprintf(target_file, "SUB R%d, %d\n", dst, size + 1);
+        copyWords(dst, src, size, target_file);
         freeReg();
+        freeReg();
+        genReturnSequence(target_file);
+        return -1;
+    }
+
+    if(t->nodetype == RETURN_NODE) {
+        int r = codeGen(t->left, target_file);
+        int addr = getReg();
+        // return value goes to [BP-2]
+        fprintf(target_file, "MOV R%d, BP\n", addr);
+        fprintf(target_file, "SUB R%d, 2\n", addr);
+        fprintf(target_file, "MOV [R%d], R%d\n", addr, r);
+        freeReg();
+        freeReg();
+        genReturnSequence(target_file);
+        return -1;
+    }
+
+    if(t->nodetype == IF_NODE) {
+        int regno = codeGen(t->left, target_file);
+        int else_label = getLabel();
+        int end_label = getLabel();
+
+        fprintf(target_file, "JZ R%d, L%d\n", regno, else_label);
+        freeReg();
+
+        if(t->mid != NULL) codeGen(t->mid, target_file);
+        fprintf(target_file, "JMP L%d\n", end_label);
+
+        fprintf(target_file, "L%d:\n", else_label);
+        if(t->right != NULL) codeGen(t->right, target_file);
+
+        fprintf(target_file, "L%d:\n", end_label);
+        return -1;
+    }
+
+    if(t->nodetype == WHILE_NODE) {
+        int while_start = getLabel();
+        int while_end = getLabel();
+
+        fprintf(target_file, "L%d:\n", while_start);
+        int reg_no = codeGen(t->left, target_file);
+        fprintf(target_file, "JZ R%d, L%d\n", reg_no, while_end);
+        freeReg();
+
+        loop_top++;
+        continue_labels[loop_top] = while_start;
+        break_labels[loop_top] = while_end;
+
         codeGen(t->right, target_file);
-        fprintf(target_file, "JMP L%d\n", start);
-        fprintf(target_file, "L%d:\n", end);
-        loopStackPop();
+
+        loop_top--;
+
+        fprintf(target_file, "JMP L%d\n", while_start);
+        fprintf(target_file, "L%d:\n", while_end);
         return -1;
     }
 
-    if (t->nodetype == DOWHILE) {
-        int start = getLabel(), end = getLabel();
-        loopStackPush(start, end);
-        fprintf(target_file, "L%d:\n", start);
-        codeGen(t->left, target_file);
-        p = codeGen(t->right, target_file);
-        fprintf(target_file, "JNZ R%d, L%d\n", p, start);
+    if(t->nodetype == DO_WHILE_NODE) {
+        int do_start = getLabel();
+        int do_continue = getLabel();
+        int do_end = getLabel();
+
+        fprintf(target_file, "L%d:\n", do_start);
+
+        loop_top++;
+        continue_labels[loop_top] = do_continue;
+        break_labels[loop_top] = do_end;
+
+        codeGen(t->right, target_file);
+        loop_top--;
+
+        fprintf(target_file, "L%d:\n", do_continue);
+        int reg_no = codeGen(t->left, target_file);
+        fprintf(target_file, "JZ R%d, L%d\n", reg_no, do_end);
         freeReg();
-        fprintf(target_file, "L%d:\n", end);
-        loopStackPop();
+
+        fprintf(target_file, "JMP L%d\n", do_start);
+        fprintf(target_file, "L%d:\n", do_end);
         return -1;
     }
 
-    if (t->nodetype == REPEAT) {
-        int start = getLabel(), end = getLabel();
-        loopStackPush(start, end);
-        fprintf(target_file, "L%d:\n", start);
-        codeGen(t->left, target_file);
-        p = codeGen(t->right, target_file);
-        fprintf(target_file, "JZ R%d, L%d\n", p, start);
+    if(t->nodetype == REPEAT_UNTIL_NODE) {
+        int repeat_start = getLabel();
+        int repeat_continue = getLabel();
+        int repeat_end = getLabel();
+
+        fprintf(target_file, "L%d:\n", repeat_start);
+
+        loop_top++;
+        continue_labels[loop_top] = repeat_continue;
+        break_labels[loop_top] = repeat_end;
+
+        codeGen(t->right, target_file);
+        loop_top--;
+
+        fprintf(target_file, "L%d:\n", repeat_continue);
+        int reg_no = codeGen(t->left, target_file);
+        fprintf(target_file, "JZ R%d, L%d\n", reg_no, repeat_start);
         freeReg();
-        fprintf(target_file, "L%d:\n", end);
-        loopStackPop();
+
+        fprintf(target_file, "L%d:\n", repeat_end);
         return -1;
     }
 
-    if (t->nodetype == IF) {
-        p = codeGen(t->left, target_file);
-        int l1 = getLabel();
-        fprintf(target_file, "JZ R%d, L%d\n", p, l1);
+    if (t->nodetype == ASSIGNMENT && isTupleType(t->left->type)) {
+        // tuple assignment: destination address first, then source (a call on the
+        // right saves the destination register), then copy word by word
+        int dst = getLValueAddr(t->left, target_file);
+        int src = genTupleAddr(t->right, target_file);
+        copyWords(dst, src, typeSize(t->left->type), target_file);
         freeReg();
-        codeGen(t->mid, target_file);
-        if (t->right) {
-            int l2 = getLabel();
-            fprintf(target_file, "JMP L%d\n", l2);
-            fprintf(target_file, "L%d:\n", l1);
-            codeGen(t->right, target_file);
-            fprintf(target_file, "L%d:\n", l2);
-        } else {
-            fprintf(target_file, "L%d:\n", l1);
+        freeReg();
+        return -1;
+    }
+
+    if (t->nodetype == ASSIGNMENT) {
+        int right_reg = codeGen(t->right, target_file);
+        int addr_reg = getLValueAddr(t->left, target_file);
+        fprintf(target_file, "MOV [R%d], R%d\n", addr_reg, right_reg);
+        freeReg(); // free addr_reg
+        freeReg(); // free right_reg
+        return -1;
+    }
+
+    if(t->nodetype == BREAK_NODE) {
+        if(loop_top >= 0) {
+            fprintf(target_file, "JMP L%d\n", break_labels[loop_top]);
         }
         return -1;
     }
 
-    if (t->nodetype == BREAK) {
-        fprintf(target_file, "JMP L%d\n", loopStackTopBreak());
+    if(t->nodetype == CONTINUE_NODE) {
+        if(loop_top >= 0) {
+            fprintf(target_file, "JMP L%d\n", continue_labels[loop_top]);
+        }
         return -1;
     }
 
-    if (t->nodetype == CONTINUE) {
-        fprintf(target_file, "JMP L%d\n", loopStackTopContinue());
+    if(t->nodetype == WRITE_NODE) {
+        int expr_reg = codeGen(t->left, target_file);
+        int temp = getReg();
+
+        fprintf(target_file, "MOV R%d, \"Write\"\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "MOV R%d, -2\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "MOV R%d, R%d\n", temp, expr_reg);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+
+        fprintf(target_file, "CALL 0\n");
+
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+
+        freeReg();  // Free temp
+        freeReg();  // Free expr_reg
         return -1;
     }
 
-    if (t->nodetype == ARRAY) {
-        if (t->GSTentry->dimensions == 2) {
-            addr = getAddr(t);
-            p = codeGen(t->left, target_file); 
-            q = codeGen(t->mid, target_file); 
-            int dim_reg = getReg();
-            int offset_reg = getReg();
-            int n = t->GSTentry->size2;
-            fprintf(target_file, "MOV R%d, %d\n", dim_reg, n);
-            fprintf(target_file, "MUL R%d, R%d\n", p, dim_reg);
-            fprintf(target_file, "ADD R%d, R%d\n", p, q); 
-            fprintf(target_file, "MOV R%d, %d\n", offset_reg, addr);
-            fprintf(target_file, "ADD R%d, R%d\n", offset_reg, p); 
-            fprintf(target_file, "MOV R%d, [R%d]\n", p, offset_reg); 
-            freeReg(); freeReg(); freeReg();
-            return p;
-        } else {
-            addr = getAddr(t);
-            p = codeGen(t->left, target_file); 
-            q = getReg();
-            fprintf(target_file, "MOV R%d, %d\n", q, addr);
-            fprintf(target_file, "ADD R%d, R%d\n", q, p); 
-            fprintf(target_file, "MOV R%d, [R%d]\n", p, q); 
+    if(t->nodetype == READ_NODE) {
+        int temp = getReg();
+        int addr_reg = getLValueAddr(t->left, target_file);
+
+        fprintf(target_file, "MOV R%d, \"Read\"\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "MOV R%d, -1\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "MOV R%d, R%d\n", temp, addr_reg);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+        fprintf(target_file, "PUSH R%d\n", temp);
+
+        fprintf(target_file, "CALL 0\n");
+
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+        fprintf(target_file, "POP R%d\n", temp);
+
+        freeReg(); // free addr_reg
+        freeReg(); // free temp
+        return -1;
+    }
+
+    if(t->nodetype == STRING_CONSTANT_NODE) {
+        int reg = getReg();
+        fprintf(target_file, "MOV R%d, %s\n", reg, t->varname);
+        return reg;
+    }
+
+    if(t->nodetype == NOT_NODE) {
+        int reg = codeGen(t->left, target_file);
+        int zero = getReg();
+        fprintf(target_file, "MOV R%d, 0\n", zero);
+        fprintf(target_file, "EQ R%d, R%d\n", reg, zero);
+        freeReg();
+        return reg;
+    }
+
+    int left_reg = codeGen(t->left, target_file);
+    int right_reg = codeGen(t->right, target_file);
+
+    switch(t->nodetype) {
+        case PLUS_NODE:
+            fprintf(target_file, "ADD R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case MINUS_NODE:
+            fprintf(target_file, "SUB R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case MUL_NODE:
+            fprintf(target_file, "MUL R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case DIV_NODE:
+            fprintf(target_file, "DIV R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case GT_NODE:
+            fprintf(target_file, "GT R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case EQ_NODE:
+            fprintf(target_file, "EQ R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case GE_NODE:
+            fprintf(target_file, "GE R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case LT_NODE:
+            fprintf(target_file, "LT R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case LE_NODE:
+            fprintf(target_file, "LE R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case NE_NODE:
+            fprintf(target_file, "NE R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case AND_NODE:
+            // booleans are 0/1: a AND b == a * b
+            fprintf(target_file, "MUL R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case OR_NODE:
+            // a OR b == (a + b) > 0
+            fprintf(target_file, "ADD R%d, R%d\n", left_reg, right_reg);
+            fprintf(target_file, "MOV R%d, 0\n", right_reg);
+            fprintf(target_file, "GT R%d, R%d\n", left_reg, right_reg);
+            freeReg(); return left_reg;
+        case MODULUS_NODE: {
+            // a % b is a-(a/b)*b
+            int temp_reg = getReg();
+            fprintf(target_file, "MOV R%d, R%d\n", temp_reg, left_reg);
+            fprintf(target_file, "DIV R%d, R%d\n", temp_reg, right_reg);
+            fprintf(target_file, "MUL R%d, R%d\n", temp_reg, right_reg);
+            fprintf(target_file, "SUB R%d, R%d\n", left_reg, temp_reg);
             freeReg();
-            return p;
+            freeReg();
+            return left_reg;
         }
     }
-
     return -1;
+}
+
+/* Header + code that sets up the stack, calls main and exits.
+   Emitted once the global declarations are processed. */
+void genStartup(FILE* fp) {
+    fprintf(fp, "0\n2056\n0\n0\n0\n0\n0\n0\n");
+    fprintf(fp, "MOV SP, %d\n", get_stack_pointer());
+    fprintf(fp, "MOV BP, SP\n");
+    fprintf(fp, "PUSH R0\n");          // space for main's return value
+    fprintf(fp, "CALL MAIN\n");
+    fprintf(fp, "POP R0\n");
+    fprintf(fp, "MOV R0, \"Exit\"\n");
+    fprintf(fp, "PUSH R0\n");
+    fprintf(fp, "PUSH R0\n");
+    fprintf(fp, "PUSH R0\n");
+    fprintf(fp, "PUSH R0\n");
+    fprintf(fp, "PUSH R0\n");
+    fprintf(fp, "CALL 0\n");
+}
+
+/* Callee side of the calling convention */
+void genFunction(char* label, int nlocals, tnode* body, FILE* fp) {
+    int i;
+    reg_index = -1;
+    loop_top = -1;
+
+    fprintf(fp, "%s:\n", label);
+    fprintf(fp, "PUSH BP\n");
+    fprintf(fp, "MOV BP, SP\n");
+    for(i = 0; i < nlocals; i++) {
+        fprintf(fp, "PUSH R0\n");      // space for local variables
+    }
+
+    codeGen(body, fp);
+
+    // in case control reaches the end of the function without a return
+    genReturnSequence(fp);
 }
