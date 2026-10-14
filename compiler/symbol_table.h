@@ -13,15 +13,31 @@
 #define INTEGER_ARRAY_TYPE 105
 #define STRING_ARRAY_TYPE 106
 #define STRING_POINTER_TYPE 107
+#define USER_ARRAY_TYPE 110     /* array of a user-defined type (element type in Gsymbol.elem) */
+#define NULL_TYPE 108            /* type of the constant NULL */
+#define ALLOC_TYPE 109           /* type of an alloc() call: assignable to any user-defined type */
+#define USER_TYPE_BASE 200       /* user-defined type i has type code USER_TYPE_BASE + i */
+#define isUserType(t) ((t) >= USER_TYPE_BASE)
+#define MAX_TYPES 32
+#define MAX_FIELDS 8             /* fixed heap block size is 8 words */
 
-/* Tuple types get codes TUPLE_BASE + id, pointers to them TUPLE_PTR_BASE + id.
-   Two tuple values have the same type only if they have the same code (name equivalence). */
-#define TUPLE_BASE 1000
-#define TUPLE_PTR_BASE 2000
-#define isTupleType(t) ((t) >= TUPLE_BASE && (t) < TUPLE_PTR_BASE)
-#define isTuplePtrType(t) ((t) >= TUPLE_PTR_BASE && (t) < TUPLE_PTR_BASE + 1000)
+/* Member field of a user-defined type */
+typedef struct Field {
+    char* name;
+    int type;         // type code of the field
+    int index;        // word offset inside the heap block
+    struct Field* next;
+} Field;
 
-/* Formal parameter list of a function (also used for the field list of a tuple definition) */
+/* Type table: one entry per user-defined type (int/str/NULL are the implicit entries) */
+typedef struct Typetable {
+    char* name;
+    int code;
+    int nfields;
+    Field* fields;
+} Typetable;
+
+/* Formal parameter list of a function */
 typedef struct Paramstruct {
     char* name;
     int type;
@@ -39,6 +55,7 @@ typedef struct Gsymbol {
     int flabel;       // function label number: F<flabel> (-1 for variables)
     int isFunction;   // 1 if this entry is a function
     int defined;      // 1 once the function definition has been seen
+    int elem;         // element type of an array of user-defined type (0 otherwise)
     struct Gsymbol *next;
 } Gsymbol;
 
@@ -49,30 +66,6 @@ typedef struct Lsymbol {
     int binding;      // offset relative to BP (params: -3,-4,..  locals: 1,2,..)
     struct Lsymbol* next;
 } Lsymbol;
-
-/* Tuple type table */
-typedef struct Fieldlist {
-    char* name;
-    int type;
-    int offset;       // offset of the field from the start of the tuple
-    struct Fieldlist* next;
-} Fieldlist;
-
-typedef struct Typetable {
-    char* name;
-    int typecode;     // TUPLE_BASE + id
-    int size;         // number of words
-    Fieldlist* fields;
-    struct Typetable* next;
-} Typetable;
-
-Typetable* TLookup(char* name);
-Typetable* TLookupByCode(int typecode);
-int TInstall(char* name, Paramstruct* fields);   // returns the new type code, -1 if redefined, -2 on duplicate field
-Fieldlist* FLookup(Typetable* t, char* fname);
-int typeSize(int type);
-int maxTupleSize();
-void print_type_table();
 
 /* Global symbol table */
 Gsymbol* Lookup(char* name);
@@ -90,9 +83,18 @@ int countParams(Paramstruct* list);
 /* Local symbol table (one active table at a time: the function being parsed) */
 void LReset();
 Lsymbol* LLookup(char* name);
-int LInstallParams(Paramstruct* params, int retsize);
-int LInstall(char* name, int type, int size);
+int LInstallParams(Paramstruct* params);
+int LInstall(char* name, int type);
 int LLocalCount();
 void print_local_table(char* fname);
+
+/* Type table */
+int TCreate(char* name);                 // returns type code, -1 if the name is already a type
+int TLookup(char* name);                 // type code, -1 if undefined
+int TAddField(int code, char* name, int type); // 0 ok, 1 duplicate field, 2 too many fields
+Field* FLookup(int code, char* name);
+int TCount();
+const char* typeName(int type);
+void print_type_table();
 
 #endif

@@ -33,10 +33,16 @@
 "enddecl"   {return ENDDECL;}
 "return"    {return RETURN;}
 "main"      {return MAIN;}
-"tuple"     {return TUPLE;}
 "AND"       {return AND;}
 "OR"        {return OR;}
 "NOT"       {return NOT;}
+"type"      {return TYPE;}
+"endtype"   {return ENDTYPE;}
+"null"      {return NULLTOK;}
+"NULL"      {return NULLTOK;}
+"alloc"     {return ALLOC;}
+"free"      {return FREE;}
+"initialize" {return INITIALIZE;}
 
 "\""[^"\n"]*"\"" { yylval.str = strdup(yytext); return STRING_TOKEN; }
 
@@ -54,7 +60,6 @@
 "<=" {return LE;}
 "==" {return EQ;}
 "!=" {return NE;}
-"->" {return ARROW;}
 "&&" {return AND;}
 "||" {return OR;}
 ">"  {return GT;}

@@ -5,6 +5,7 @@
 #include <string.h>
 
 extern void yyerror(const char *s);
+int genHeapCall(char* label, int arg_reg, FILE* target_file);
 
 int reg_index = -1;
 int label_index = -1;
@@ -56,46 +57,30 @@ int getCurrentReturnType() {
 int pointerTo(int base_type) {
     if(base_type == INTEGER_TYPE) return INTEGER_POINTER_TYPE;
     if(base_type == STRING_TYPE) return STRING_POINTER_TYPE;
-    if(isTupleType(base_type)) return TUPLE_PTR_BASE + (base_type - TUPLE_BASE);
     yyerror("invalid pointer base type");
     exit(1);
 }
 
+/* Name equivalence: types must be identical; NULL is compatible with every user-defined type */
+static int argCompatible(int lt, int rt) {
+    return lt == rt || (isUserType(lt) && rt == NULL_TYPE);
+}
+
+static int assignable(int lt, int rt) {
+    return argCompatible(lt, rt) || (isUserType(lt) && rt == ALLOC_TYPE);
+}
+
+static int comparable(int lt, int rt) {
+    if(lt == ALLOC_TYPE || rt == ALLOC_TYPE) return 0;
+    return argCompatible(lt, rt) || argCompatible(rt, lt);
+}
+
 static int isArrayType(int type) {
-    return type == INTEGER_ARRAY_TYPE || type == STRING_ARRAY_TYPE;
+    return type == INTEGER_ARRAY_TYPE || type == STRING_ARRAY_TYPE || type == USER_ARRAY_TYPE;
 }
 
 static int isPointerType(int type) {
-    return type == INTEGER_POINTER_TYPE || type == STRING_POINTER_TYPE || isTuplePtrType(type);
-}
-
-/* Static scratch area where a tuple returned by a function is copied right after the call.
-   The caller consumes it immediately (assignment / argument push / return), with no call in between. */
-int tuple_scratch = -1;
-
-void allocTupleScratch() {
-    int size = maxTupleSize();
-    if(size > 0) {
-        Install("__tuple_ret", INTEGER_ARRAY_TYPE, size, NULL);
-        tuple_scratch = Lookup("__tuple_ret")->binding;
-    }
-}
-
-tnode* makeFieldNode(tnode* base, char* fname) {
-    if(!isTupleType(base->type)) {
-        if(isTuplePtrType(base->type)) semanticError("use -> to access field %s through a tuple pointer", fname);
-        semanticError("field access .%s on a non-tuple value", fname);
-    }
-    Typetable* t = TLookupByCode(base->type);
-    Fieldlist* f = FLookup(t, fname);
-    if(f == NULL) {
-        char msg[200];
-        snprintf(msg, sizeof(msg), "tuple %s has no field named %s", t->name, fname);
-        yyerror(msg);
-        exit(1);
-    }
-    tnode* node = createNode(f->offset, f->type, FIELD_NODE, fname, base, NULL, NULL);
-    return node;
+    return type == INTEGER_POINTER_TYPE || type == STRING_POINTER_TYPE;
 }
 
 tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnode *r, tnode* m) {
@@ -120,7 +105,7 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
             break;
 
         case LT_NODE: case GT_NODE: case LE_NODE: case GE_NODE: case EQ_NODE: case NE_NODE:
-            if(l->type != r->type || isArrayType(l->type) || l->type == BOOLEAN_TYPE || isTupleType(l->type)) {
+            if(!comparable(l->type, r->type) || isArrayType(l->type) || l->type == BOOLEAN_TYPE) {
                 yyerror("type mismatch in comparison");
                 exit(1);
             }
@@ -153,7 +138,6 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
         case DEREF_NODE:
             if(l->type == INTEGER_POINTER_TYPE) newNode->type = INTEGER_TYPE;
             else if(l->type == STRING_POINTER_TYPE) newNode->type = STRING_TYPE;
-            else if(isTuplePtrType(l->type)) newNode->type = TUPLE_BASE + (l->type - TUPLE_PTR_BASE);
             else {
                 yyerror("type mismatch: dereferencing a non-pointer");
                 exit(1);
@@ -161,9 +145,8 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
             break;
 
         case ADDRESS_NODE:
-            if((l->nodetype != VARIABLE && l->nodetype != FIELD_NODE) ||
-               (l->type != INTEGER_TYPE && l->type != STRING_TYPE && !isTupleType(l->type))) {
-                yyerror("& can only be applied to an int/str/tuple variable or field");
+            if(l->nodetype != VARIABLE || (l->type != INTEGER_TYPE && l->type != STRING_TYPE)) {
+                yyerror("& can only be applied to an int/str variable");
                 exit(1);
             }
             newNode->type = pointerTo(l->type);
@@ -174,7 +157,7 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
                 yyerror("cannot assign value directly to an array name");
                 exit(1);
             }
-            if(l->type != r->type) {
+            if(!assignable(l->type, r->type)) {
                 yyerror("type mismatch in assignment");
                 exit(1);
             }
@@ -194,8 +177,15 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
             }
             break;
 
+        case FREE_NODE:
+            if(!isUserType(l->type)) {
+                yyerror("free expects a variable of a user-defined type");
+                exit(1);
+            }
+            break;
+
         case RETURN_NODE:
-            if(l->type != current_return_type) {
+            if(!argCompatible(current_return_type, l->type)) {
                 yyerror("type mismatch: return type does not match function type");
                 exit(1);
             }
@@ -203,6 +193,13 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
     }
 
     return newNode;
+}
+
+tnode* makeFieldNode(tnode* base, char* field) {
+    if(!isUserType(base->type)) semanticError("%s is not a variable of a user-defined type", base->varname);
+    Field* f = FLookup(base->type, field);
+    if(f == NULL) semanticError("no member field named %s", field);
+    return createNode(f->index, f->type, FIELD_NODE, field, base, NULL, NULL);
 }
 
 /* Look up the local symbol table first, then the global symbol table */
@@ -229,7 +226,7 @@ tnode* makeVarNode(char* name, tnode* index1, tnode* index2) {
             if(index1->type != INTEGER_TYPE || (index2 && index2->type != INTEGER_TYPE)) {
                 semanticError("array index of %s must be an integer", name);
             }
-            node->type = (G->type == INTEGER_ARRAY_TYPE) ? INTEGER_TYPE : STRING_TYPE;
+            node->type = (G->type == INTEGER_ARRAY_TYPE) ? INTEGER_TYPE : (G->type == STRING_ARRAY_TYPE) ? STRING_TYPE : G->elem;
         }
     } else {
         if(index1 != NULL) semanticError("%s is not an array", name);
@@ -246,7 +243,7 @@ tnode* makeCallNode(char* name, tnode* args) {
     Paramstruct* p = G->paramlist;
     tnode* a = args;
     while(p != NULL && a != NULL) {
-        if(p->type != a->left->type) semanticError("type mismatch in argument to %s", name);
+        if(!argCompatible(p->type, a->left->type)) semanticError("type mismatch in argument to %s", name);
         p = p->next;
         a = a->right;
     }
@@ -259,6 +256,13 @@ tnode* makeCallNode(char* name, tnode* args) {
 
 /* Computes the memory address of a variable (or array element) into a register */
 int getVarAddressReg(tnode *varNode, FILE *target_file) {
+    // Member field: address = (value of the base reference) + field offset
+    if(varNode->nodetype == FIELD_NODE) {
+        int base_reg = codeGen(varNode->left, target_file);
+        if(varNode->val != 0) fprintf(target_file, "ADD R%d, %d\n", base_reg, varNode->val);
+        return base_reg;
+    }
+
     int addr_reg = getReg();
 
     // Local variable / parameter: address = BP + binding
@@ -297,79 +301,20 @@ int getVarAddressReg(tnode *varNode, FILE *target_file) {
     return addr_reg;
 }
 
-int genTupleAddr(tnode* e, FILE* target_file);
-int genFunctionCall(tnode* t, FILE* target_file);
-
-/* Address of a tuple field = address of the tuple + field offset */
-int getFieldAddressReg(tnode* field, FILE* target_file) {
-    int r = genTupleAddr(field->left, target_file);
-    if(field->val != 0) fprintf(target_file, "ADD R%d, %d\n", r, field->val);
-    return r;
-}
-
 /* Address of anything that can be assigned to / read into / have its address taken */
 int getLValueAddr(tnode* node, FILE* target_file) {
-    if(node->nodetype == FIELD_NODE) return getFieldAddressReg(node, target_file);
     if(node->nodetype == DEREF_NODE) return codeGen(node->left, target_file);
     return getVarAddressReg(node, target_file);
 }
 
-/* Base address of a tuple-valued expression */
-int genTupleAddr(tnode* e, FILE* target_file) {
-    if(e->nodetype == FUNC_CALL_NODE) return genFunctionCall(e, target_file);  // address of the scratch copy
-    return getLValueAddr(e, target_file);
-}
-
-/* Copy n words from [src] to [dst]; both registers are clobbered */
-void copyWords(int dst, int src, int n, FILE* target_file) {
-    int t = getReg();
-    int k;
-    for(k = 0; k < n; k++) {
-        fprintf(target_file, "MOV R%d, [R%d]\n", t, src);
-        fprintf(target_file, "MOV [R%d], R%d\n", dst, t);
-        if(k < n - 1) {
-            fprintf(target_file, "ADD R%d, 1\n", src);
-            fprintf(target_file, "ADD R%d, 1\n", dst);
-        }
-    }
-    freeReg();
-}
-
 /* Push arguments in reverse order: the last argument is pushed first,
-   so that argument 1 ends up at [BP-3], argument 2 at [BP-4], ...
-   A tuple argument is passed by value: its words are pushed first field first. */
+   so that argument 1 ends up at [BP-3], argument 2 at [BP-4], ... */
 void pushArgs(tnode* arg, FILE* target_file) {
     if(arg == NULL) return;
     pushArgs(arg->right, target_file);
-    tnode* e = arg->left;
-    if(isTupleType(e->type)) {
-        int size = typeSize(e->type);
-        int a = genTupleAddr(e, target_file);
-        int t = getReg();
-        int k;
-        for(k = 0; k < size; k++) {
-            fprintf(target_file, "MOV R%d, [R%d]\n", t, a);
-            fprintf(target_file, "PUSH R%d\n", t);
-            if(k < size - 1) fprintf(target_file, "ADD R%d, 1\n", a);
-        }
-        freeReg();
-        freeReg();
-        return;
-    }
-    int r = codeGen(e, target_file);
+    int r = codeGen(arg->left, target_file);
     fprintf(target_file, "PUSH R%d\n", r);
     freeReg();
-}
-
-/* Number of words the arguments of f occupy on the stack */
-static int argWords(Gsymbol* f) {
-    int n = 0;
-    Paramstruct* p = f->paramlist;
-    while(p != NULL) {
-        n += typeSize(p->type);
-        p = p->next;
-    }
-    return n;
 }
 
 int genFunctionCall(tnode* t, FILE* target_file) {
@@ -384,12 +329,9 @@ int genFunctionCall(tnode* t, FILE* target_file) {
     // 2. evaluate and push arguments
     pushArgs(t->left, target_file);
 
-    // 3. push space for the return value (a tuple needs typeSize words)
-    int retsize = typeSize(t->Gentry->type);
+    // 3. push space for the return value
     int tmp = getReg();
-    for(i = 0; i < retsize; i++) {
-        fprintf(target_file, "PUSH R%d\n", tmp);
-    }
+    fprintf(target_file, "PUSH R%d\n", tmp);
     freeReg();
 
     // 4. call
@@ -397,22 +339,10 @@ int genFunctionCall(tnode* t, FILE* target_file) {
 
     // 5. after return: fetch return value into a fresh register
     int ret_reg = getReg();
-    if(isTupleType(t->Gentry->type)) {
-        // pop the returned tuple (last field on top) into the scratch area; ret_reg = its address
-        tmp = getReg();
-        fprintf(target_file, "MOV R%d, %d\n", ret_reg, tuple_scratch + retsize - 1);
-        for(i = 0; i < retsize; i++) {
-            fprintf(target_file, "POP R%d\n", tmp);
-            fprintf(target_file, "MOV [R%d], R%d\n", ret_reg, tmp);
-            if(i < retsize - 1) fprintf(target_file, "SUB R%d, 1\n", ret_reg);
-        }
-        freeReg();
-    } else {
-        fprintf(target_file, "POP R%d\n", ret_reg);
-    }
+    fprintf(target_file, "POP R%d\n", ret_reg);
 
     // 6. pop the arguments
-    int nargs = argWords(t->Gentry);
+    int nargs = countParams(t->Gentry->paramlist);
     if(nargs > 0) {
         tmp = getReg();
         for(i = 0; i < nargs; i++) {
@@ -427,6 +357,20 @@ int genFunctionCall(tnode* t, FILE* target_file) {
     }
 
     return ret_reg;
+}
+
+/* Calls a heap routine (argument and result in R0). With arg_reg >= 0 the argument is in that
+   register and the result is written back to it; otherwise the result goes to a fresh register. */
+int genHeapCall(char* label, int arg_reg, FILE* target_file) {
+    int saved = (arg_reg >= 0) ? arg_reg - 1 : reg_index;
+    int i, res;
+    for(i = 0; i <= saved; i++) fprintf(target_file, "PUSH R%d\n", i);
+    if(arg_reg > 0) fprintf(target_file, "MOV R0, R%d\n", arg_reg);
+    fprintf(target_file, "CALL %s\n", label);
+    res = (arg_reg >= 0) ? arg_reg : getReg();
+    if(res != 0) fprintf(target_file, "MOV R%d, R0\n", res);
+    for(i = saved; i >= 0; i--) fprintf(target_file, "POP R%d\n", i);
+    return res;
 }
 
 void genReturnSequence(FILE* target_file) {
@@ -459,12 +403,6 @@ int codeGen(tnode *t, FILE *target_file) {
         return getLValueAddr(t->left, target_file);
     }
 
-    if(t->nodetype == FIELD_NODE) {
-        int r = getFieldAddressReg(t, target_file);
-        fprintf(target_file, "MOV R%d, [R%d]\n", r, r);
-        return r;
-    }
-
     if (t->nodetype == VARIABLE) {
         int r = getReg();
         int addr_reg = getVarAddressReg(t, target_file);
@@ -473,22 +411,23 @@ int codeGen(tnode *t, FILE *target_file) {
         return r;
     }
 
-    if(t->nodetype == FUNC_CALL_NODE) {
-        return genFunctionCall(t, target_file);
+    if(t->nodetype == FIELD_NODE) {
+        int r = getVarAddressReg(t, target_file);
+        fprintf(target_file, "MOV R%d, [R%d]\n", r, r);
+        return r;
     }
 
-    if(t->nodetype == RETURN_NODE && isTupleType(t->left->type)) {
-        // copy the tuple into the return slot [BP-size-1 .. BP-2]
-        int size = typeSize(t->left->type);
-        int src = genTupleAddr(t->left, target_file);
-        int dst = getReg();
-        fprintf(target_file, "MOV R%d, BP\n", dst);
-        fprintf(target_file, "SUB R%d, %d\n", dst, size + 1);
-        copyWords(dst, src, size, target_file);
-        freeReg();
-        freeReg();
-        genReturnSequence(target_file);
-        return -1;
+    if(t->nodetype == ALLOC_NODE || t->nodetype == INIT_NODE) {
+        return genHeapCall(t->nodetype == ALLOC_NODE ? "HALLOC" : "HINIT", -1, target_file);
+    }
+
+    if(t->nodetype == FREE_NODE) {
+        int a = codeGen(t->left, target_file);
+        return genHeapCall("HFREE", a, target_file);
+    }
+
+    if(t->nodetype == FUNC_CALL_NODE) {
+        return genFunctionCall(t, target_file);
     }
 
     if(t->nodetype == RETURN_NODE) {
@@ -588,17 +527,6 @@ int codeGen(tnode *t, FILE *target_file) {
         freeReg();
 
         fprintf(target_file, "L%d:\n", repeat_end);
-        return -1;
-    }
-
-    if (t->nodetype == ASSIGNMENT && isTupleType(t->left->type)) {
-        // tuple assignment: destination address first, then source (a call on the
-        // right saves the destination register), then copy word by word
-        int dst = getLValueAddr(t->left, target_file);
-        int src = genTupleAddr(t->right, target_file);
-        copyWords(dst, src, typeSize(t->left->type), target_file);
-        freeReg();
-        freeReg();
         return -1;
     }
 
@@ -786,4 +714,55 @@ void genFunction(char* label, int nlocals, tnode* body, FILE* fp) {
 
     // in case control reaches the end of the function without a return
     genReturnSequence(fp);
+}
+
+/* Fixed-size (8 word) block allocator over the heap region 1024-2047.
+   The free list is threaded through the first word of each free block;
+   its head is kept in the hidden global $heap. Argument/result in R0; clobbers R0-R3. */
+void genHeapRoutines(FILE* fp) {
+    Gsymbol* h = Lookup("$heap");
+    if(h == NULL) return;
+    int a = h->binding;
+
+    // Initialize: link blocks 1024, 1032, ..., 2040 into the free list
+    fprintf(fp, "HINIT:\n");
+    fprintf(fp, "MOV R0, 1024\n");
+    fprintf(fp, "MOV [%d], R0\n", a);
+    fprintf(fp, "MOV R3, 2048\n");
+    fprintf(fp, "HLOOP:\n");
+    fprintf(fp, "MOV R1, R0\n");
+    fprintf(fp, "ADD R1, 8\n");
+    fprintf(fp, "MOV R2, R1\n");
+    fprintf(fp, "EQ R2, R3\n");
+    fprintf(fp, "JZ R2, HSET\n");
+    fprintf(fp, "MOV R1, 0\n");
+    fprintf(fp, "HSET:\n");
+    fprintf(fp, "MOV [R0], R1\n");
+    fprintf(fp, "JZ R1, HDONE\n");
+    fprintf(fp, "MOV R0, R1\n");
+    fprintf(fp, "JMP HLOOP\n");
+    fprintf(fp, "HDONE:\n");
+    fprintf(fp, "MOV R0, 0\n");
+    fprintf(fp, "RET\n");
+
+    // Alloc: pop the first free block (returns 0 = NULL if the heap is exhausted)
+    fprintf(fp, "HALLOC:\n");
+    fprintf(fp, "MOV R0, [%d]\n", a);
+    fprintf(fp, "JZ R0, HAEND\n");
+    fprintf(fp, "MOV R1, [R0]\n");
+    fprintf(fp, "MOV [%d], R1\n", a);
+    fprintf(fp, "HAEND:\n");
+    fprintf(fp, "RET\n");
+
+    // Free: push the block back on the free list (returns 0 on success, -1 on failure)
+    fprintf(fp, "HFREE:\n");
+    fprintf(fp, "JZ R0, HFBAD\n");
+    fprintf(fp, "MOV R1, [%d]\n", a);
+    fprintf(fp, "MOV [R0], R1\n");
+    fprintf(fp, "MOV [%d], R0\n", a);
+    fprintf(fp, "MOV R0, 0\n");
+    fprintf(fp, "RET\n");
+    fprintf(fp, "HFBAD:\n");
+    fprintf(fp, "MOV R0, -1\n");
+    fprintf(fp, "RET\n");
 }

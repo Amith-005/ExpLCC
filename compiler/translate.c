@@ -1,47 +1,60 @@
-struct LATable
-{
-    char *label;
-    int addr;
-    struct LATable *next;
-} *head, *tail;
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-void append(char *label, int addr)
+typedef struct Label
 {
-    struct LATable *new_node = (struct LATable *)malloc(sizeof(struct LATable));
-    new_node->label = label;
-    new_node->addr = addr;
-    new_node->next = NULL;
-    if (head == NULL)
+    char name[50];
+    int address;
+    struct Label *next;
+} Label;
+
+Label *head = NULL;
+
+void addLabel(char *name, int address)
+{
+    Label *temp;
+
+    temp = (Label *)malloc(sizeof(Label));
+
+    if (temp == NULL)
     {
-        head = tail = new_node;
+        printf("Memory allocation failed\n");
+        exit(1);
     }
-    else
-    {
-        tail->next = new_node;
-        tail = new_node;
-    }
+
+    strcpy(temp->name, name);
+    temp->address = address;
+    temp->next = head;
+    head = temp;
 }
 
-int getAddr(char *label)
+int getAddress(char *name)
 {
-    struct LATable *temp = head;
+    Label *temp;
+
+    temp = head;
+
     while (temp != NULL)
     {
-        if (strcmp(temp->label, label) == 0)
-        {
-            return temp->addr;
-        }
+        if (strcmp(temp->name, name) == 0)
+            return temp->address;
+
         temp = temp->next;
     }
-    return -1;
+
+    printf("Error: Label %s not found\n", name);
+    exit(1);
 }
 
-void printTable()
+void freeLabels()
 {
-    struct LATable *temp = head;
-    while (temp != NULL)
+    Label *temp;
+
+    while (head != NULL)
     {
-        printf("%s\t%d\n", temp->label, temp->addr);
-        temp = temp->next;
+        temp = head;
+        head = head->next;
+        free(temp);
     }
 }

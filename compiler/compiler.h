@@ -40,7 +40,10 @@
 #define AND_NODE 34
 #define OR_NODE 35
 #define NOT_NODE 36
-#define FIELD_NODE 37       // left = tuple-valued expression, val = field offset, varname = field name
+#define FIELD_NODE 37       // left = base (VARIABLE or FIELD_NODE), val = field offset, varname = field name
+#define ALLOC_NODE 38       // alloc()
+#define FREE_NODE 39        // free(left)
+#define INIT_NODE 40        // initialize()
 
 /* Type constants are in symbol_table.h */
 
@@ -61,6 +64,12 @@ tnode* createNode(int val, int type, int nodetype, char* c, struct tnode *l, str
 /* Variable reference: resolves name in local table first, then global table */
 tnode* makeVarNode(char* name, tnode* index1, tnode* index2);
 
+/* Member field access: base.field */
+tnode* makeFieldNode(tnode* base, char* field);
+
+/* Emits the heap routines (Initialize/Alloc/Free) if the program uses user-defined types */
+void genHeapRoutines(FILE* fp);
+
 /* Function call node with argument list (chain of ARG_NODEs) */
 tnode* makeCallNode(char* name, tnode* args);
 
@@ -77,12 +86,6 @@ void setCurrentFunction(Gsymbol* f, int returnType);
 int getCurrentReturnType();
 void genStartup(FILE* fp);
 void genFunction(char* label, int nlocals, tnode* body, FILE* fp);
-
-/* Tuple field access: base must be tuple valued */
-tnode* makeFieldNode(tnode* base, char* fname);
-
-/* Static scratch area that receives tuples returned by functions */
-void allocTupleScratch();
 
 int pointerTo(int base_type);
 
