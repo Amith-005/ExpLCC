@@ -2,9 +2,9 @@
 
 **ExpLCC** is a stage-wise compiler for the **Experimental Programming Language (ExpL)**, implemented in **C using Flex and Bison/YACC**, and targeting the **Experimental String Machine (XSM)**.
 
-The compiler is developed incrementally, with each stage extending the previous implementation. The Git history preserves this evolution from a basic arithmetic-expression compiler to a compiler supporting variables, control flow, symbol tables, arrays, pointers, functions, recursion, local scope, user-defined types, and dynamic memory management.
+The compiler is developed incrementally, with each stage extending the previous implementation. The Git history preserves this evolution from a basic arithmetic-expression compiler to a compiler supporting variables, control flow, symbol tables, arrays, pointers, functions, recursion, local scope, user-defined types, dynamic memory management, classes, objects, and methods.
 
-The current implementation covers **Stage 1 through Stage 6**.
+The current implementation covers **Stage 1 through Stage 7**.
 
 ---
 
@@ -22,6 +22,7 @@ The current implementation covers **Stage 1 through Stage 6**.
 - Runtime stack-frame management
 - User-defined types
 - Dynamic heap allocation
+- Classes, objects, and methods
 - XSM target-code generation
 
 ---
@@ -275,6 +276,75 @@ Stage 6 enables the compiler to support dynamically allocated recursive data str
 
 ---
 
+## Stage 7 — Classes, Objects and Methods
+
+Stage 7 extends ExpLCC with the core object-oriented features of ExpL.
+
+### Newly Implemented
+
+- `class ... endclass` blocks
+- Class declarations
+- Class Table management
+- Class member fields
+- Class methods
+- Method declarations and definitions
+- Class-field lookup
+- Method lookup
+- `self` as the implicit current-object reference inside methods
+- Class objects as global variables
+- Class objects as local variables
+- Class objects as function and method arguments
+- Object creation using `new()`
+- Object deletion using `delete()`
+- Member access on class objects
+- Method invocation on class objects
+- Method parameter and return-type checking
+- Class-specific semantic checks
+- AST and code-generation support for class operations
+
+Example class:
+
+```c
+class
+    Point {
+        decl
+            int x;
+            int y;
+            int getX();
+        enddecl
+
+        int getX() {
+            begin
+                return self.x;
+            end
+        }
+    }
+endclass
+```
+
+An object can be declared and dynamically created:
+
+```c
+decl
+    Point p;
+enddecl
+
+p = new(Point);
+```
+
+A method can then be invoked on the object:
+
+```c
+write(p.getX());
+```
+
+Stage 7 introduces the basic object model for ExpL by combining class metadata, object allocation, member access, and method execution.
+
+**Inheritance is not part of Stage 7; it is introduced in the following stage.**
+
+
+---
+
 # Compilation Pipeline
 
 ```text
@@ -395,6 +465,25 @@ It maintains information about:
 Field lookup allows nested field expressions to be type checked and translated correctly.
 
 ---
+
+
+## Class Table
+
+Stage 7 introduces a Class Table for storing class-level metadata.
+
+It maintains information such as:
+
+- class names
+- member fields
+- field positions
+- methods
+- method signatures
+- method labels
+
+Class and method lookup allow the compiler to validate member access and method calls during semantic analysis.
+
+---
+
 
 # Runtime Organization
 
@@ -517,39 +606,16 @@ ExpLCC demonstrates:
 - runtime stack organization
 - activation records
 - functions
-- recursion* target code generation
-
----
-
-## Development History
-
-The repository uses Git commits to preserve each major compiler milestone.
-
-```text
-Stage 1
-Arithmetic Expression Compiler
-        ↓
-Stage 2
-Variables + Assignment + I/O
-        ↓
-Stage 3
-Control Flow + Labels + LAT
-        ↓
-Stage 4
-GST + Arrays + Pointers
-        ↓
-Stage 5
-Functions + LST + Recursion + Tuples
-```
-
-Each stage builds on the previous implementation rather than existing as an independent compi>
-
-
-
+- recursion
 - user-defined types
 - recursive data structures
 - dynamic memory allocation
 - free-list memory management
+- classes and objects
+- class tables
+- member fields
+- methods and method calls
+- object allocation and deletion
 - target code generation
 
 ---
@@ -574,8 +640,11 @@ Functions + LST + Recursion + Tuples
         ↓
 Stage 6
 User-Defined Types + Dynamic Memory Management
+        ↓
+Stage 7
+Classes + Objects + Methods
 ```
 
 Each stage builds upon the previous implementation rather than existing as an independent compiler copy.
 
-The Git commit history therefore provides a direct record of the compiler's development from Stage 1 through Stage 6.
+The Git commit history therefore provides a direct record of the compiler's development from Stage 1 through Stage 7.
