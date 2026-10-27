@@ -5,7 +5,7 @@
 #include <string.h>
 
 extern void yyerror(const char *s);
-int genHeapCall(char* label, int arg_reg, FILE* target_file);
+int genLibCall(char* code, int arg1_reg, int arg1_const, FILE* target_file);
 
 int reg_index = -1;
 int label_index = -1;
@@ -17,6 +17,9 @@ int loop_top = -1;
 /* Function currently being parsed (for return type checking) */
 Gsymbol* current_function = NULL;
 int current_return_type = INTEGER_TYPE;
+
+/* Class whose methods are being parsed (0 outside a class) */
+int current_class = 0;
 
 void semanticError(const char* fmt, const char* name) {
     char msg[200];
@@ -50,6 +53,14 @@ void setCurrentFunction(Gsymbol* f, int returnType) {
     current_return_type = returnType;
 }
 
+void setCurrentClass(int code) {
+    current_class = code;
+}
+
+int getCurrentClass() {
+    return current_class;
+}
+
 int getCurrentReturnType() {
     return current_return_type;
 }
@@ -63,7 +74,7 @@ int pointerTo(int base_type) {
 
 /* Name equivalence: types must be identical; NULL is compatible with every user-defined type */
 static int argCompatible(int lt, int rt) {
-    return lt == rt || (isUserType(lt) && rt == NULL_TYPE);
+    return lt == rt || ((isUserType(lt) || isClassType(lt)) && rt == NULL_TYPE);
 }
 
 static int assignable(int lt, int rt) {
@@ -76,7 +87,7 @@ static int comparable(int lt, int rt) {
 }
 
 static int isArrayType(int type) {
-    return type == INTEGER_ARRAY_TYPE || type == STRING_ARRAY_TYPE || type == USER_ARRAY_TYPE;
+    return type == INTEGER_ARRAY_TYPE || type == STRING_ARRAY_TYPE;
 }
 
 static int isPointerType(int type) {
@@ -94,6 +105,7 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
     newNode->nodetype = nodetype;
     newNode->Gentry = NULL;
     newNode->Lentry = NULL;
+    newNode->Mentry = NULL;
 
     switch(nodetype) {
         case PLUS_NODE: case MINUS_NODE: case MUL_NODE: case DIV_NODE: case MODULUS_NODE:
@@ -184,6 +196,13 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
             }
             break;
 
+        case DELETE_NODE:
+            if(!isUserType(l->type) && !isClassType(l->type)) {
+                yyerror("delete expects a variable of a user-defined type or a class");
+                exit(1);
+            }
+            break;
+
         case RETURN_NODE:
             if(!argCompatible(current_return_type, l->type)) {
                 yyerror("type mismatch: return type does not match function type");
@@ -196,6 +215,15 @@ tnode* createNode(int val, int type, int nodetype, char* varname, tnode *l, tnod
 }
 
 tnode* makeFieldNode(tnode* base, char* field) {
+    if(isClassType(base->type)) {
+        /* member fields of a class are private: only self.field is permitted */
+        if(base->nodetype != VARIABLE || base->Lentry == NULL || strcmp(base->varname, "self") != 0) {
+            semanticError("member field %s of a class can be accessed only through self", field);
+        }
+        Field* cf = Class_Flookup(base->type, field);
+        if(cf == NULL) semanticError("no member field named %s", field);
+        return createNode(cf->index, cf->type, FIELD_NODE, field, base, NULL, NULL);
+    }
     if(!isUserType(base->type)) semanticError("%s is not a variable of a user-defined type", base->varname);
     Field* f = FLookup(base->type, field);
     if(f == NULL) semanticError("no member field named %s", field);
@@ -214,6 +242,8 @@ tnode* makeVarNode(char* name, tnode* index1, tnode* index2) {
         return node;
     }
 
+    if(current_class != 0) semanticError("undeclared variable %s (a method can use only its arguments, locals and self.fields)", name);
+
     Gsymbol* G = Lookup(name);
     if(G == NULL) semanticError("undeclared variable %s", name);
     if(G->isFunction) semanticError("%s is a function, not a variable", name);
@@ -226,7 +256,7 @@ tnode* makeVarNode(char* name, tnode* index1, tnode* index2) {
             if(index1->type != INTEGER_TYPE || (index2 && index2->type != INTEGER_TYPE)) {
                 semanticError("array index of %s must be an integer", name);
             }
-            node->type = (G->type == INTEGER_ARRAY_TYPE) ? INTEGER_TYPE : (G->type == STRING_ARRAY_TYPE) ? STRING_TYPE : G->elem;
+            node->type = (G->type == INTEGER_ARRAY_TYPE) ? INTEGER_TYPE : STRING_TYPE;
         }
     } else {
         if(index1 != NULL) semanticError("%s is not an array", name);
@@ -236,6 +266,7 @@ tnode* makeVarNode(char* name, tnode* index1, tnode* index2) {
 }
 
 tnode* makeCallNode(char* name, tnode* args) {
+    if(current_class != 0) semanticError("a method cannot call the global function %s", name);
     Gsymbol* G = Lookup(name);
     if(G == NULL || !G->isFunction) semanticError("call to undeclared function %s", name);
 
@@ -252,6 +283,40 @@ tnode* makeCallNode(char* name, tnode* args) {
     tnode* node = createNode(0, G->type, FUNC_CALL_NODE, name, args, NULL, NULL);
     node->Gentry = G;
     return node;
+}
+
+tnode* makeSelfNode() {
+    Lsymbol* L = (current_class != 0) ? LLookup("self") : NULL;
+    if(L == NULL) semanticError("%s can be used only inside a method", "self");
+    tnode* node = createNode(0, L->type, VARIABLE, "self", NULL, NULL, NULL);
+    node->Lentry = L;
+    return node;
+}
+
+/* Name equivalence on the signature; the implicit self is not part of the argument list */
+tnode* makeMethodCallNode(tnode* object, char* method, tnode* args) {
+    if(!isClassType(object->type)) semanticError("method %s invoked on a non-class expression", method);
+    Method* m = Class_Mlookup(object->type, method);
+    if(m == NULL) semanticError("no method named %s in the class", method);
+
+    Paramstruct* p = m->paramlist;
+    tnode* a = args;
+    while(p != NULL && a != NULL) {
+        if(!argCompatible(p->type, a->left->type)) semanticError("type mismatch in argument to %s", method);
+        p = p->next;
+        a = a->right;
+    }
+    if(p != NULL || a != NULL) semanticError("wrong number of arguments in call to %s", method);
+
+    tnode* node = createNode(0, m->type, METHOD_CALL_NODE, method, args, NULL, object);
+    node->Mentry = m;
+    return node;
+}
+
+tnode* makeNewNode(char* classname) {
+    int code = CLookup(classname);
+    if(code < 0) semanticError("new: undefined class %s", classname);
+    return createNode(code, code, NEW_NODE, classname, NULL, NULL, NULL);
 }
 
 /* Computes the memory address of a variable (or array element) into a register */
@@ -359,18 +424,72 @@ int genFunctionCall(tnode* t, FILE* target_file) {
     return ret_reg;
 }
 
-/* Calls a heap routine (argument and result in R0). With arg_reg >= 0 the argument is in that
-   register and the result is written back to it; otherwise the result goes to a fresh register. */
-int genHeapCall(char* label, int arg_reg, FILE* target_file) {
-    int saved = (arg_reg >= 0) ? arg_reg - 1 : reg_index;
-    int i, res;
+/* Method invocation. Same convention as a function call, except that the object (self) is
+   pushed after the other arguments, so that it ends up at [BP-3] with argument 1 at [BP-4]. */
+int genMethodCall(tnode* t, FILE* target_file) {
+    int saved = reg_index;
+    int i;
+
+    for(i = 0; i <= saved; i++) {
+        fprintf(target_file, "PUSH R%d\n", i);
+    }
+
+    pushArgs(t->left, target_file);
+
+    int obj = codeGen(t->mid, target_file);
+    fprintf(target_file, "PUSH R%d\n", obj);              // self
+    freeReg();
+
+    int tmp = getReg();
+    fprintf(target_file, "PUSH R%d\n", tmp);              // space for the return value
+    freeReg();
+
+    fprintf(target_file, "CALL F%d\n", t->Mentry->flabel);
+
+    int ret_reg = getReg();
+    fprintf(target_file, "POP R%d\n", ret_reg);
+
+    int nargs = countParams(t->Mentry->paramlist) + 1;    // + self
+    tmp = getReg();
+    for(i = 0; i < nargs; i++) {
+        fprintf(target_file, "POP R%d\n", tmp);
+    }
+    freeReg();
+
+    for(i = saved; i >= 0; i--) {
+        fprintf(target_file, "POP R%d\n", i);
+    }
+
+    return ret_reg;
+}
+
+/* Calls a library function through the ABI: CALL 0 with the function code, three arguments and an
+   empty slot for the return value on the stack (the same interface as Read/Write/Exit).
+   Registers in use are saved around the call. Returns a fresh register holding the return value. */
+int genLibCall(char* code, int arg1_reg, int arg1_const, FILE* target_file) {
+    int saved = reg_index;
+    int i;
     for(i = 0; i <= saved; i++) fprintf(target_file, "PUSH R%d\n", i);
-    if(arg_reg > 0) fprintf(target_file, "MOV R0, R%d\n", arg_reg);
-    fprintf(target_file, "CALL %s\n", label);
-    res = (arg_reg >= 0) ? arg_reg : getReg();
-    if(res != 0) fprintf(target_file, "MOV R%d, R0\n", res);
+    int t = getReg();
+    int res = getReg();
+    fprintf(target_file, "MOV R%d, \"%s\"\n", t, code);
+    fprintf(target_file, "PUSH R%d\n", t);               // function code
+    if(arg1_reg >= 0) {
+        fprintf(target_file, "PUSH R%d\n", arg1_reg);    // argument 1
+    } else {
+        fprintf(target_file, "MOV R%d, %d\n", t, arg1_const);
+        fprintf(target_file, "PUSH R%d\n", t);
+    }
+    fprintf(target_file, "PUSH R%d\n", t);               // argument 2 (unused)
+    fprintf(target_file, "PUSH R%d\n", t);               // argument 3 (unused)
+    fprintf(target_file, "PUSH R%d\n", t);               // space for the return value
+    fprintf(target_file, "CALL 0\n");
+    fprintf(target_file, "POP R%d\n", res);              // return value
+    for(i = 0; i < 4; i++) fprintf(target_file, "POP R%d\n", t);
     for(i = saved; i >= 0; i--) fprintf(target_file, "POP R%d\n", i);
-    return res;
+    fprintf(target_file, "MOV R%d, R%d\n", t, res);
+    freeReg();                                           // res
+    return t;
 }
 
 void genReturnSequence(FILE* target_file) {
@@ -417,13 +536,36 @@ int codeGen(tnode *t, FILE *target_file) {
         return r;
     }
 
-    if(t->nodetype == ALLOC_NODE || t->nodetype == INIT_NODE) {
-        return genHeapCall(t->nodetype == ALLOC_NODE ? "HALLOC" : "HINIT", -1, target_file);
+    if(t->nodetype == ALLOC_NODE) {
+        return genLibCall("Alloc", -1, 8, target_file);        // size = fixed block size
+    }
+
+    if(t->nodetype == INIT_NODE) {
+        return genLibCall("Heapset", -1, 0, target_file);
     }
 
     if(t->nodetype == FREE_NODE) {
         int a = codeGen(t->left, target_file);
-        return genHeapCall("HFREE", a, target_file);
+        int r = genLibCall("Free", a, 0, target_file);
+        fprintf(target_file, "MOV R%d, R%d\n", a, r);
+        freeReg();
+        return a;
+    }
+
+    if(t->nodetype == NEW_NODE) {
+        return genLibCall("Alloc", -1, 8, target_file);        // 8 words for the member fields
+    }
+
+    if(t->nodetype == DELETE_NODE) {
+        int a = codeGen(t->left, target_file);
+        genLibCall("Free", a, 0, target_file);
+        freeReg();  // result of Free
+        freeReg();  // a
+        return -1;
+    }
+
+    if(t->nodetype == METHOD_CALL_NODE) {
+        return genMethodCall(t, target_file);
     }
 
     if(t->nodetype == FUNC_CALL_NODE) {
@@ -714,55 +856,4 @@ void genFunction(char* label, int nlocals, tnode* body, FILE* fp) {
 
     // in case control reaches the end of the function without a return
     genReturnSequence(fp);
-}
-
-/* Fixed-size (8 word) block allocator over the heap region 1024-2047.
-   The free list is threaded through the first word of each free block;
-   its head is kept in the hidden global $heap. Argument/result in R0; clobbers R0-R3. */
-void genHeapRoutines(FILE* fp) {
-    Gsymbol* h = Lookup("$heap");
-    if(h == NULL) return;
-    int a = h->binding;
-
-    // Initialize: link blocks 1024, 1032, ..., 2040 into the free list
-    fprintf(fp, "HINIT:\n");
-    fprintf(fp, "MOV R0, 1024\n");
-    fprintf(fp, "MOV [%d], R0\n", a);
-    fprintf(fp, "MOV R3, 2048\n");
-    fprintf(fp, "HLOOP:\n");
-    fprintf(fp, "MOV R1, R0\n");
-    fprintf(fp, "ADD R1, 8\n");
-    fprintf(fp, "MOV R2, R1\n");
-    fprintf(fp, "EQ R2, R3\n");
-    fprintf(fp, "JZ R2, HSET\n");
-    fprintf(fp, "MOV R1, 0\n");
-    fprintf(fp, "HSET:\n");
-    fprintf(fp, "MOV [R0], R1\n");
-    fprintf(fp, "JZ R1, HDONE\n");
-    fprintf(fp, "MOV R0, R1\n");
-    fprintf(fp, "JMP HLOOP\n");
-    fprintf(fp, "HDONE:\n");
-    fprintf(fp, "MOV R0, 0\n");
-    fprintf(fp, "RET\n");
-
-    // Alloc: pop the first free block (returns 0 = NULL if the heap is exhausted)
-    fprintf(fp, "HALLOC:\n");
-    fprintf(fp, "MOV R0, [%d]\n", a);
-    fprintf(fp, "JZ R0, HAEND\n");
-    fprintf(fp, "MOV R1, [R0]\n");
-    fprintf(fp, "MOV [%d], R1\n", a);
-    fprintf(fp, "HAEND:\n");
-    fprintf(fp, "RET\n");
-
-    // Free: push the block back on the free list (returns 0 on success, -1 on failure)
-    fprintf(fp, "HFREE:\n");
-    fprintf(fp, "JZ R0, HFBAD\n");
-    fprintf(fp, "MOV R1, [%d]\n", a);
-    fprintf(fp, "MOV [R0], R1\n");
-    fprintf(fp, "MOV [%d], R0\n", a);
-    fprintf(fp, "MOV R0, 0\n");
-    fprintf(fp, "RET\n");
-    fprintf(fp, "HFBAD:\n");
-    fprintf(fp, "MOV R0, -1\n");
-    fprintf(fp, "RET\n");
 }

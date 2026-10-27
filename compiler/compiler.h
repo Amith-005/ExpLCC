@@ -44,7 +44,9 @@
 #define ALLOC_NODE 38       // alloc()
 #define FREE_NODE 39        // free(left)
 #define INIT_NODE 40        // initialize()
-
+#define NEW_NODE 41         // new(classname): type = the class, val = class type code
+#define DELETE_NODE 42      // delete(left)
+#define METHOD_CALL_NODE 43 // mid = object expression, Mentry = method, left = argument list
 /* Type constants are in symbol_table.h */
 
 
@@ -55,6 +57,7 @@ typedef struct tnode {
     int nodetype;   // information about non-leaf nodes - read/write/connector/+/* etc.
     Gsymbol* Gentry; // global symbol table entry (global variables and functions)
     Lsymbol* Lentry; // local symbol table entry (locals and parameters)
+    Method* Mentry;  // class table entry of the invoked method (method calls)
     struct tnode *left,*right,*mid;
 } tnode;
 
@@ -67,8 +70,18 @@ tnode* makeVarNode(char* name, tnode* index1, tnode* index2);
 /* Member field access: base.field */
 tnode* makeFieldNode(tnode* base, char* field);
 
-/* Emits the heap routines (Initialize/Alloc/Free) if the program uses user-defined types */
-void genHeapRoutines(FILE* fp);
+/* self: the implicit first argument of a method */
+tnode* makeSelfNode();
+
+/* Method invocation: object.method(args) */
+tnode* makeMethodCallNode(tnode* object, char* method, tnode* args);
+
+/* new(classname) */
+tnode* makeNewNode(char* classname);
+
+/* Class whose methods are being parsed (0 outside a class) */
+void setCurrentClass(int code);
+int getCurrentClass();
 
 /* Function call node with argument list (chain of ARG_NODEs) */
 tnode* makeCallNode(char* name, tnode* args);

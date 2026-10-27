@@ -13,6 +13,23 @@
     int decl_type = -1;        // type of the declaration currently being parsed
     char func_label[20];       // label of the function currently being parsed
     int cur_type = -1;         // user-defined type currently being defined
+    int cur_class = -1;        // class currently being defined (type code)
+    int in_class = 0;          // 1 while the body of a class is being parsed
+    int methods_started = 0;   // 1 once a method declaration has been seen in the current class
+    FILE* methods_out = NULL;  // code of the methods (they appear before the global declarations)
+
+    /* The startup code must come first, so the method code is written to a side file and appended after it */
+    FILE* codeOut() { return in_class ? methods_out : out; }
+
+    void flushMethods() {
+        char buf[1024];
+        size_t n;
+        rewind(methods_out);
+        while((n = fread(buf, 1, sizeof(buf), methods_out)) > 0) fwrite(buf, 1, n, out);
+        fclose(methods_out);
+        remove("methods.tmp");
+        methods_out = NULL;
+    }
 
     void declError(const char* fmt, const char* name) {
         char msg[200];
@@ -55,14 +72,13 @@
 
     int resolveType(char* name) {
         int t = TLookup(name);
+        if(t < 0) t = CLookup(name);
         if(t < 0) declError("undefined type %s", name);
         return t;
     }
 
-    int arrayTypeOf(int elem) {
-        if(elem == INTEGER_TYPE) return INTEGER_ARRAY_TYPE;
-        if(elem == STRING_TYPE) return STRING_ARRAY_TYPE;
-        return USER_ARRAY_TYPE;
+    void checkNotArrayOfUser(int type, char* name) {
+        if(isUserType(type) || isClassType(type)) declError("arrays of user-defined type are not supported (%s)", name);
     }
 
     tnode* appendArg(tnode* list, tnode* expr) {
@@ -72,6 +88,29 @@
         while(temp->right != NULL) temp = temp->right;
         temp->right = arg;
         return list;
+    }
+
+    /* Checks a method definition header against its declaration; self is at BP-3, arguments start at BP-4 */
+    void beginMethod(char* name, int type, Paramstruct* params) {
+        Method* m = Class_Mlookup(cur_class, name);
+        if(m == NULL) declError("method %s is not declared in its class", name);
+        if(m->defined) declError("redefinition of method %s", name);
+        if(m->type != type) declError("return type of %s does not match its declaration", name);
+        checkParams(name, m->paramlist, params);
+        m->defined = 1;
+
+        LReset();
+        LInstallSelf(cur_class);
+        if(LInstallParams(params, -4)) declError("duplicate parameter name in %s", name);
+        setCurrentFunction(NULL, type);
+        snprintf(func_label, sizeof(func_label), "F%d", m->flabel);
+    }
+
+    void checkAllMethodsDefined() {
+        Method* m;
+        for(m = Class_Entry(cur_class)->methods; m != NULL; m = m->next) {
+            if(!m->defined) declError("method %s declared but not defined", m->name);
+        }
     }
 
     /* Checks a function definition header against its declaration and sets up its local symbol table */
@@ -84,7 +123,7 @@
         f->defined = 1;
 
         LReset();
-        if(LInstallParams(params)) declError("duplicate parameter name in %s", name);
+        if(LInstallParams(params, -3)) declError("duplicate parameter name in %s", name);
         setCurrentFunction(f, f->type);
         snprintf(func_label, sizeof(func_label), "F%d", f->flabel);
     }
@@ -107,10 +146,10 @@
     Paramstruct* plist;
 }
 
-%type <node> FieldRef stmt_list stmt expr AsgStmt OutputStmt InputStmt Ifstmt Whilestmt DoWhilestmt RepeatUntilstmt ReturnStmt VarNode LValue Body ArgList CallExpr
+%type <node> FieldRef MethodCall DeleteStmt stmt_list stmt expr AsgStmt OutputStmt InputStmt Ifstmt Whilestmt DoWhilestmt RepeatUntilstmt ReturnStmt VarNode LValue Body ArgList CallExpr
 %type <ival> Type
 %type <plist> ParamList NEParamList Param
-%token TYPE ENDTYPE NULLTOK ALLOC FREE INITIALIZE NBEGIN END READ WRITE EQ GT NE LT LE GE IF WHILE ENDIF DO ENDWHILE THEN ELSE REPEAT UNTIL DECL ENDDECL INT STR RETURN MAIN AND OR NOT BREAK CONTINUE
+%token TYPE ENDTYPE NULLTOK ALLOC FREE INITIALIZE NBEGIN END READ WRITE EQ GT NE LT LE GE IF WHILE ENDIF DO ENDWHILE THEN ELSE REPEAT UNTIL DECL ENDDECL INT STR RETURN MAIN AND OR NOT BREAK CONTINUE CLASS ENDCLASS NEW DELETE SELF
 %token <str> ID STRING_TOKEN
 %token <ival> NUM
 
@@ -124,8 +163,8 @@
 
 %%
 
-program : TypeDefOpt GdeclOpt FdefBlock MainBlock   { checkAllFunctionsDefined(); }
-        | TypeDefOpt GdeclOpt MainBlock             { checkAllFunctionsDefined(); }
+program : TypeDefOpt ClassDefOpt GdeclOpt FdefBlock MainBlock   { checkAllFunctionsDefined(); }
+        | TypeDefOpt ClassDefOpt GdeclOpt MainBlock             { checkAllFunctionsDefined(); }
         ;
 
 /* ---------------- Type definitions ---------------- */
@@ -154,15 +193,68 @@ FieldDeclList : FieldDeclList FieldDecl
 FieldDecl : Type ID ';'   { installField($2, $1); }
           ;
 
-/* ---------------- Global declarations ---------------- */
+/* ---------------- Class definitions ---------------- */
 
-GdeclOpt : HeapVar GdeclBlock   { print_symbol_table(); genStartup(out); }
-         | HeapVar              { genStartup(out); }
+ClassDefOpt : CLASS ClassDefList ENDCLASS   { print_class_table(); }
+            | /* empty */
+            ;
+
+ClassDefList : ClassDefList ClassDef
+             | ClassDef
+             ;
+
+ClassDef : ClassName '{' DECL MemberList ENDDECL MethodDefs '}' {
+                checkAllMethodsDefined();
+                in_class = 0;
+                setCurrentClass(0);
+            }
          ;
 
-/* hidden global word holding the head of the heap free list (only when user-defined types exist) */
-HeapVar : /* empty */   { if(TCount() > 0) Install("$heap", INTEGER_TYPE, 1, NULL); }
-        ;
+ClassName : ID {
+                cur_class = CInstall($1);
+                if(cur_class < 0) declError("redefinition of class %s", $1);
+                in_class = 1;
+                methods_started = 0;
+            }
+          ;
+
+MemberList : MemberList Member
+           | /* empty */
+           ;
+
+Member : Type ID ';' {
+                if(methods_started) declError("member field %s must be declared before the methods", $2);
+                int r = Class_Finstall(cur_class, $2, $1);
+                if(r == 1) declError("duplicate member field %s", $2);
+                if(r == 2) declError("too many member fields in class %s", typeName(cur_class));
+            }
+       | Type ID '(' ParamList ')' ';' {
+                methods_started = 1;
+                if(isClassType($1)) declError("method %s cannot return a class", $2);
+                if(Class_Minstall(cur_class, $2, $1, $4) == NULL) {
+                    declError("duplicate method name or too many methods (%s)", $2);
+                }
+            }
+       ;
+
+MethodDefs : MethodDefs MethodDef
+           | /* empty */
+           ;
+
+MethodDef : MethodHeader '{' LdeclBlock Body '}' {
+                print_local_table(func_label);
+                genFunction(func_label, LLocalCount(), $4, codeOut());
+            }
+          ;
+
+MethodHeader : Type ID '(' ParamList ')'  { setCurrentClass(cur_class); beginMethod($2, $1, $4); }
+             ;
+
+/* ---------------- Global declarations ---------------- */
+
+GdeclOpt : GdeclBlock   { print_symbol_table(); genStartup(out); flushMethods(); }
+         | /* empty */          { genStartup(out); flushMethods(); }
+         ;
 
 GdeclBlock : DECL GdeclList ENDDECL
            | DECL ENDDECL
@@ -184,19 +276,20 @@ Gid : ID                        { installGlobal($1, decl_type, 1, NULL); }
     | ID '[' NUM ']' {
             int* metadata = (int*)malloc(sizeof(int));
             metadata[0] = $3;
-            int arr_type = arrayTypeOf(decl_type);
+            checkNotArrayOfUser(decl_type, $1);
+            int arr_type = (decl_type == INTEGER_TYPE) ? INTEGER_ARRAY_TYPE : STRING_ARRAY_TYPE;
             installGlobal($1, arr_type, $3, metadata);
-            Lookup($1)->elem = isUserType(decl_type) ? decl_type : 0;
         }
     | ID '[' NUM ']' '[' NUM ']' {
             int* metadata = (int*)malloc(2 * sizeof(int));
             metadata[0] = $3;
             metadata[1] = $6;
-            int arr_type = arrayTypeOf(decl_type);
+            checkNotArrayOfUser(decl_type, $1);
+            int arr_type = (decl_type == INTEGER_TYPE) ? INTEGER_ARRAY_TYPE : STRING_ARRAY_TYPE;
             installGlobal($1, arr_type, $3 * $6, metadata);
-            Lookup($1)->elem = isUserType(decl_type) ? decl_type : 0;
         }
     | ID '(' ParamList ')' {
+            if(isClassType(decl_type)) declError("function %s cannot return a class", $1);
             if(InstallFunction($1, decl_type, $3)) {
                 declError("redeclaration of %s", $1);
             }
@@ -211,7 +304,10 @@ NEParamList : NEParamList ',' Param  { $$ = appendParam($1, $3); }
             | Param                  { $$ = $1; }
             ;
 
-Param : Type ID       { $$ = makeParam($2, $1); }
+Param : Type ID       {
+            if(isClassType($1)) declError("class variable %s cannot be an argument", $2);
+            $$ = makeParam($2, $1);
+        }
       ;
 
 Type : INT { $$ = INTEGER_TYPE; }
@@ -278,7 +374,7 @@ stmt_list : stmt_list stmt ';' { $$ = createNode(0, INTEGER_TYPE, STATEMENT, NUL
           | stmt ';' { $$ = $1; }
           ;
 
-stmt : InputStmt | OutputStmt | AsgStmt | Ifstmt | Whilestmt | DoWhilestmt | RepeatUntilstmt | ReturnStmt
+stmt : InputStmt | OutputStmt | AsgStmt | Ifstmt | Whilestmt | DoWhilestmt | RepeatUntilstmt | ReturnStmt | DeleteStmt
      | BREAK { $$ = createNode(0, 0, BREAK_NODE, NULL, NULL, NULL, NULL); }
      | CONTINUE { $$ = createNode(0, 0, CONTINUE_NODE, NULL, NULL, NULL, NULL); }
      ;
@@ -301,6 +397,11 @@ InputStmt : READ '(' VarNode ')' {
                 $$ = createNode(0, INTEGER_TYPE, READ_NODE, NULL, $3, NULL, NULL);
             }
             ;
+
+DeleteStmt : DELETE '(' VarNode ')' {
+                $$ = createNode(0, INTEGER_TYPE, DELETE_NODE, NULL, $3, NULL, NULL);
+             }
+             ;
 
 ReturnStmt : RETURN expr {
                 $$ = createNode(0, INTEGER_TYPE, RETURN_NODE, NULL, $2, NULL, NULL);
@@ -345,11 +446,21 @@ expr : expr '+' expr  { $$ = createNode(0, INTEGER_TYPE, PLUS_NODE, NULL, $1, $3
      | FREE '(' expr ')'  { $$ = createNode(0, INTEGER_TYPE, FREE_NODE, NULL, $3, NULL, NULL); }
      | STRING_TOKEN   { $$ = createNode(0, STRING_TYPE, STRING_CONSTANT_NODE, $1, NULL, NULL, NULL); }
      | CallExpr       { $$ = $1; }
+     | NEW '(' ID ')' { $$ = makeNewNode($3); }
      ;
 
 CallExpr : ID '(' ')'         { $$ = makeCallNode($1, NULL); }
          | ID '(' ArgList ')' { $$ = makeCallNode($1, $3); }
+         | MethodCall         { $$ = $1; }
          ;
+
+MethodCall : SELF '.' ID '(' ')'             { $$ = makeMethodCallNode(makeSelfNode(), $3, NULL); }
+           | SELF '.' ID '(' ArgList ')'     { $$ = makeMethodCallNode(makeSelfNode(), $3, $5); }
+           | ID '.' ID '(' ')'               { $$ = makeMethodCallNode(makeVarNode($1, NULL, NULL), $3, NULL); }
+           | ID '.' ID '(' ArgList ')'       { $$ = makeMethodCallNode(makeVarNode($1, NULL, NULL), $3, $5); }
+           | FieldRef '.' ID '(' ')'         { $$ = makeMethodCallNode($1, $3, NULL); }
+           | FieldRef '.' ID '(' ArgList ')' { $$ = makeMethodCallNode($1, $3, $5); }
+           ;
 
 ArgList : ArgList ',' expr { $$ = appendArg($1, $3); }
         | expr             { $$ = appendArg(NULL, $1); }
@@ -361,7 +472,7 @@ VarNode : ID                            { $$ = makeVarNode($1, NULL, NULL); }
         | FieldRef                      { $$ = $1; }
         ;
 
-FieldRef : ID '[' expr ']' '.' ID { $$ = makeFieldNode(makeVarNode($1, $3, NULL), $6); }
+FieldRef : SELF '.' ID      { $$ = makeFieldNode(makeSelfNode(), $3); }
          | ID '.' ID        { $$ = makeFieldNode(makeVarNode($1, NULL, NULL), $3); }
          | FieldRef '.' ID  { $$ = makeFieldNode($1, $3); }
          ;
@@ -386,6 +497,12 @@ int main(int argc, char* argv[]) {
     }
     yyin = fp;
 
+    methods_out = fopen("methods.tmp", "w+");
+    if(!methods_out) {
+        printf("File couldn't be opened exiting\n");
+        exit(1);
+    }
+
     out = fopen("a.xsm", "w");
     if(!out) {
         printf("File couldn't be opened exiting\n");
@@ -397,7 +514,6 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    genHeapRoutines(out);
     fclose(out);
     printf("Code generated in a.xsm\n");
     return 0;

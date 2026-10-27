@@ -48,11 +48,14 @@ int Install(char* name, int type, int size, int* metadata) {
     newentry->flabel = -1;
     newentry->isFunction = 0;
     newentry->defined = 0;
-    newentry->elem = 0;
     newentry->next = NULL;
 
     appendGlobal(newentry);
     return 0;
+}
+
+int newFunctionLabel() {
+    return flabel_count++;
 }
 
 int InstallFunction(char* name, int type, Paramstruct* paramlist) {
@@ -67,10 +70,9 @@ int InstallFunction(char* name, int type, Paramstruct* paramlist) {
     newentry->binding = -1;
     newentry->metadata = NULL;
     newentry->paramlist = paramlist;
-    newentry->flabel = flabel_count++;
+    newentry->flabel = newFunctionLabel();
     newentry->isFunction = 1;
     newentry->defined = 0;
-    newentry->elem = 0;
     newentry->next = NULL;
 
     appendGlobal(newentry);
@@ -169,9 +171,10 @@ static int LAppend(char* name, int type, int binding) {
     return 0;
 }
 
-/* Parameter i (1-based) is at BP-(i+2): [BP-1] = return address, [BP-2] = return value */
-int LInstallParams(Paramstruct* params) {
-    int binding = -3;
+/* Parameter i (1-based) is at BP-(i+2): [BP-1] = return address, [BP-2] = return value.
+   Methods get the implicit self at BP-3, so their parameters start at BP-4. */
+int LInstallParams(Paramstruct* params, int first_binding) {
+    int binding = first_binding;
     while(params != NULL) {
         if(LAppend(params->name, params->type, binding)) {
             return 1;
@@ -180,6 +183,10 @@ int LInstallParams(Paramstruct* params) {
         params = params->next;
     }
     return 0;
+}
+
+int LInstallSelf(int class_type) {
+    return LAppend("self", class_type, -3);
 }
 
 /* Local variable i (1-based) is at BP+i */
@@ -206,6 +213,9 @@ void print_local_table(char* fname) {
 }
 
 /* ---------------- Type table ---------------- */
+
+static Classtable* ctable[MAX_CLASSES];
+static int ccount = 0;
 
 static Typetable* ttable[MAX_TYPES];
 static int tcount = 0;
@@ -268,6 +278,7 @@ const char* typeName(int type) {
         case BOOLEAN_TYPE: return "boolean";
     }
     if(isUserType(type) && type - USER_TYPE_BASE < tcount) return ttable[type - USER_TYPE_BASE]->name;
+    if(isClassType(type) && type - CLASS_TYPE_BASE < ccount) return ctable[type - CLASS_TYPE_BASE]->name;
     return "?";
 }
 
@@ -281,5 +292,114 @@ void print_type_table() {
             printf(" %s:%s@%d", f->name, typeName(f->type), f->index);
         }
         printf("\n");
+    }
+}
+
+/* ---------------- Class table ---------------- */
+
+Classtable* Class_Entry(int code) {
+    if(!isClassType(code) || code - CLASS_TYPE_BASE >= ccount) return NULL;
+    return ctable[code - CLASS_TYPE_BASE];
+}
+
+int CLookup(char* name) {
+    int i;
+    for(i = 0; i < ccount; i++) {
+        if(strcmp(ctable[i]->name, name) == 0) return ctable[i]->code;
+    }
+    return -1;
+}
+
+int CInstall(char* name) {
+    if(TLookup(name) >= 0 || CLookup(name) >= 0 || ccount >= MAX_CLASSES) return -1;
+    Classtable* c = (Classtable*) malloc(sizeof(Classtable));
+    c->name = strdup(name);
+    c->code = CLASS_TYPE_BASE + ccount;
+    c->nfields = 0;
+    c->fields = NULL;
+    c->nmethods = 0;
+    c->methods = NULL;
+    c->parent = NULL;
+    ctable[ccount++] = c;
+    return c->code;
+}
+
+Field* Class_Flookup(int code, char* name) {
+    Classtable* c = Class_Entry(code);
+    Field* f;
+    if(c == NULL) return NULL;
+    for(f = c->fields; f != NULL; f = f->next) {
+        if(strcmp(f->name, name) == 0) return f;
+    }
+    return NULL;
+}
+
+Method* Class_Mlookup(int code, char* name) {
+    Classtable* c = Class_Entry(code);
+    Method* m;
+    if(c == NULL) return NULL;
+    for(m = c->methods; m != NULL; m = m->next) {
+        if(strcmp(m->name, name) == 0) return m;
+    }
+    return NULL;
+}
+
+int Class_Finstall(int code, char* name, int type) {
+    Classtable* c = Class_Entry(code);
+    Field* f;
+    Field* last = NULL;
+    for(f = c->fields; f != NULL; f = f->next) {
+        if(strcmp(f->name, name) == 0) return 1;
+        last = f;
+    }
+    if(c->nfields >= MAX_FIELDS) return 2;
+    f = (Field*) malloc(sizeof(Field));
+    f->name = strdup(name);
+    f->type = type;
+    f->index = c->nfields++;
+    f->next = NULL;
+    if(last == NULL) c->fields = f; else last->next = f;
+    return 0;
+}
+
+/* Only one method per name is allowed (no overloading); a method name may not clash with a field */
+Method* Class_Minstall(int code, char* name, int type, Paramstruct* params) {
+    Classtable* c = Class_Entry(code);
+    Method* m;
+    Method* last = NULL;
+    if(Class_Mlookup(code, name) != NULL || Class_Flookup(code, name) != NULL) return NULL;
+    if(c->nmethods >= MAX_METHODS) return NULL;
+    for(m = c->methods; m != NULL; m = m->next) last = m;
+    m = (Method*) malloc(sizeof(Method));
+    m->name = strdup(name);
+    m->type = type;
+    m->paramlist = params;
+    m->flabel = newFunctionLabel();
+    m->position = c->nmethods++;
+    m->defined = 0;
+    m->next = NULL;
+    if(last == NULL) c->methods = m; else last->next = m;
+    return m;
+}
+
+void print_class_table() {
+    int i;
+    Field* f;
+    Method* m;
+    printf("---- Class Table ----\n");
+    for(i = 0; i < ccount; i++) {
+        printf("%s (code %d, %d fields, %d methods, parent: NULL)\n", ctable[i]->name, ctable[i]->code, ctable[i]->nfields, ctable[i]->nmethods);
+        for(f = ctable[i]->fields; f != NULL; f = f->next) {
+            printf("  field  %s:%s@%d\n", f->name, typeName(f->type), f->index);
+        }
+        for(m = ctable[i]->methods; m != NULL; m = m->next) {
+            printf("  method %s:%s position %d label F%d (", m->name, typeName(m->type), m->position, m->flabel);
+            Paramstruct* p = m->paramlist;
+            while(p != NULL) {
+                printf("%s %s%s", typeName(p->type), p->name, p->next ? ", " : "");
+                p = p->next;
+            }
+            printf(")\n");
+        }
     }
 }

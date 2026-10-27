@@ -43,6 +43,11 @@
 "alloc"     {return ALLOC;}
 "free"      {return FREE;}
 "initialize" {return INITIALIZE;}
+"class"     {return CLASS;}
+"endclass"  {return ENDCLASS;}
+"new"       {return NEW;}
+"delete"    {return DELETE;}
+"self"      {return SELF;}
 
 "\""[^"\n"]*"\"" { yylval.str = strdup(yytext); return STRING_TOKEN; }
 
