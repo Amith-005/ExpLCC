@@ -45,6 +45,7 @@
     }
 
     void installLocal(char* name, int type) {
+        if(isClassType(type)) declError("class variable %s cannot be a local variable", name);
         if(LInstall(name, type)) {
             declError("redeclaration of local variable %s", name);
         }
@@ -92,16 +93,16 @@
 
     /* Checks a method definition header against its declaration; self is at BP-3, arguments start at BP-4 */
     void beginMethod(char* name, int type, Paramstruct* params) {
-        Method* m = Class_Mlookup(cur_class, name);
-        if(m == NULL) declError("method %s is not declared in its class", name);
+        Method* m = Class_MlookupSig(cur_class, name, params);
+        if(m == NULL || m->owner != cur_class) declError("method %s with these parameter types is not declared in its class", name);
         if(m->defined) declError("redefinition of method %s", name);
         if(m->type != type) declError("return type of %s does not match its declaration", name);
         checkParams(name, m->paramlist, params);
         m->defined = 1;
 
         LReset();
-        LInstallSelf(cur_class);
-        if(LInstallParams(params, -4)) declError("duplicate parameter name in %s", name);
+        LInstallSelf(cur_class);   // self is 2 words: BP-4 and BP-3
+        if(LInstallParams(params, -5)) declError("duplicate parameter name in %s", name);
         setCurrentFunction(NULL, type);
         snprintf(func_label, sizeof(func_label), "F%d", m->flabel);
     }
@@ -149,7 +150,7 @@
 %type <node> FieldRef MethodCall DeleteStmt stmt_list stmt expr AsgStmt OutputStmt InputStmt Ifstmt Whilestmt DoWhilestmt RepeatUntilstmt ReturnStmt VarNode LValue Body ArgList CallExpr
 %type <ival> Type
 %type <plist> ParamList NEParamList Param
-%token TYPE ENDTYPE NULLTOK ALLOC FREE INITIALIZE NBEGIN END READ WRITE EQ GT NE LT LE GE IF WHILE ENDIF DO ENDWHILE THEN ELSE REPEAT UNTIL DECL ENDDECL INT STR RETURN MAIN AND OR NOT BREAK CONTINUE CLASS ENDCLASS NEW DELETE SELF
+%token TYPE ENDTYPE NULLTOK ALLOC FREE INITIALIZE NBEGIN END READ WRITE EQ GT NE LT LE GE IF WHILE ENDIF DO ENDWHILE THEN ELSE REPEAT UNTIL DECL ENDDECL INT STR RETURN MAIN AND OR NOT BREAK CONTINUE CLASS ENDCLASS EXTENDS NEW DELETE SELF
 %token <str> ID STRING_TOKEN
 %token <ival> NUM
 
@@ -195,7 +196,7 @@ FieldDecl : Type ID ';'   { installField($2, $1); }
 
 /* ---------------- Class definitions ---------------- */
 
-ClassDefOpt : CLASS ClassDefList ENDCLASS   { print_class_table(); }
+ClassDefOpt : CLASS ClassDefList ENDCLASS   { print_class_table(); reserveVFT(); }
             | /* empty */
             ;
 
@@ -211,7 +212,15 @@ ClassDef : ClassName '{' DECL MemberList ENDDECL MethodDefs '}' {
          ;
 
 ClassName : ID {
-                cur_class = CInstall($1);
+                cur_class = CInstall($1, -1);
+                if(cur_class < 0) declError("redefinition of class %s", $1);
+                in_class = 1;
+                methods_started = 0;
+            }
+          | ID EXTENDS ID {
+                int parent = CLookup($3);
+                if(parent < 0) declError("undefined parent class %s", $3);
+                cur_class = CInstall($1, parent);
                 if(cur_class < 0) declError("redefinition of class %s", $1);
                 in_class = 1;
                 methods_started = 0;
@@ -231,9 +240,10 @@ Member : Type ID ';' {
        | Type ID '(' ParamList ')' ';' {
                 methods_started = 1;
                 if(isClassType($1)) declError("method %s cannot return a class", $2);
-                if(Class_Minstall(cur_class, $2, $1, $4) == NULL) {
-                    declError("duplicate method name or too many methods (%s)", $2);
-                }
+                int r = Class_Minstall(cur_class, $2, $1, $4);
+                if(r == 1) declError("duplicate method name (%s)", $2);
+                if(r == 2) declError("too many methods in class %s", typeName(cur_class));
+                if(r == 3) declError("method %s overrides an inherited method with a different return type", $2);
             }
        ;
 
@@ -271,7 +281,7 @@ GidList : GidList ',' Gid
         | Gid
         ;
 
-Gid : ID                        { installGlobal($1, decl_type, 1, NULL); }
+Gid : ID                        { installGlobal($1, decl_type, isClassType(decl_type) ? 2 : 1, NULL); }
     | '*' ID                    { installGlobal($2, pointerTo(decl_type), 1, NULL); }
     | ID '[' NUM ']' {
             int* metadata = (int*)malloc(sizeof(int));

@@ -74,6 +74,7 @@ int pointerTo(int base_type) {
 
 /* Name equivalence: types must be identical; NULL is compatible with every user-defined type */
 static int argCompatible(int lt, int rt) {
+    if(isClassType(lt) && isClassType(rt)) return isSubclass(rt, lt);   // subtype polymorphism
     return lt == rt || ((isUserType(lt) || isClassType(lt)) && rt == NULL_TYPE);
 }
 
@@ -296,20 +297,25 @@ tnode* makeSelfNode() {
 /* Name equivalence on the signature; the implicit self is not part of the argument list */
 tnode* makeMethodCallNode(tnode* object, char* method, tnode* args) {
     if(!isClassType(object->type)) semanticError("method %s invoked on a non-class expression", method);
-    Method* m = Class_Mlookup(object->type, method);
-    if(m == NULL) semanticError("no method named %s in the class", method);
-
-    Paramstruct* p = m->paramlist;
-    tnode* a = args;
-    while(p != NULL && a != NULL) {
-        if(!argCompatible(p->type, a->left->type)) semanticError("type mismatch in argument to %s", method);
-        p = p->next;
-        a = a->right;
+    Method* m;
+    Method* found = NULL;
+    int named = 0;
+    for(m = Class_Entry(object->type)->methods; m != NULL && found == NULL; m = m->next) {
+        if(strcmp(m->name, method) != 0) continue;
+        named = 1;
+        Paramstruct* p = m->paramlist;
+        tnode* a = args;
+        while(p != NULL && a != NULL && argCompatible(p->type, a->left->type)) {
+            p = p->next;
+            a = a->right;
+        }
+        if(p == NULL && a == NULL) found = m;
     }
-    if(p != NULL || a != NULL) semanticError("wrong number of arguments in call to %s", method);
+    if(!named) semanticError("no method named %s in the class", method);
+    if(found == NULL) semanticError("no version of %s matches the arguments of the call", method);
 
-    tnode* node = createNode(0, m->type, METHOD_CALL_NODE, method, args, NULL, object);
-    node->Mentry = m;
+    tnode* node = createNode(0, found->type, METHOD_CALL_NODE, method, args, NULL, object);
+    node->Mentry = found;
     return node;
 }
 
@@ -424,8 +430,15 @@ int genFunctionCall(tnode* t, FILE* target_file) {
     return ret_reg;
 }
 
-/* Method invocation. Same convention as a function call, except that the object (self) is
-   pushed after the other arguments, so that it ends up at [BP-3] with argument 1 at [BP-4]. */
+/* Base address of the virtual function table of a class: 8 words per class from 4096 */
+static int vftBase(int class_type) {
+    return 4096 + 8 * (class_type - CLASS_TYPE_BASE);
+}
+
+/* Method invocation. Same convention as a function call, except that self (the pair
+   [member field pointer, VFT pointer]) is pushed after the other arguments: the member field pointer
+   ends up at [BP-4], the VFT pointer at [BP-3] and argument 1 at [BP-5]. The method address is read
+   at run time from the VFT of the object; the offset is the method's position in the class table. */
 int genMethodCall(tnode* t, FILE* target_file) {
     int saved = reg_index;
     int i;
@@ -436,21 +449,25 @@ int genMethodCall(tnode* t, FILE* target_file) {
 
     pushArgs(t->left, target_file);
 
-    int obj = codeGen(t->mid, target_file);
-    fprintf(target_file, "PUSH R%d\n", obj);              // self
+    int a = getVarAddressReg(t->mid, target_file);        // address of the object's [field pointer, VFT pointer]
+    int f = getReg();
+    fprintf(target_file, "MOV R%d, [R%d]\n", f, a);
+    fprintf(target_file, "PUSH R%d\n", f);                // member field pointer
+    fprintf(target_file, "ADD R%d, 1\n", a);
+    fprintf(target_file, "MOV R%d, [R%d]\n", f, a);
+    fprintf(target_file, "PUSH R%d\n", f);                // VFT pointer
+    fprintf(target_file, "ADD R%d, %d\n", f, t->Mentry->position);
+    fprintf(target_file, "MOV R%d, [R%d]\n", f, f);       // label of the method for the actual class
+    fprintf(target_file, "PUSH R%d\n", a);                // space for the return value
+    fprintf(target_file, "CALL R%d\n", f);
     freeReg();
-
-    int tmp = getReg();
-    fprintf(target_file, "PUSH R%d\n", tmp);              // space for the return value
     freeReg();
-
-    fprintf(target_file, "CALL F%d\n", t->Mentry->flabel);
 
     int ret_reg = getReg();
     fprintf(target_file, "POP R%d\n", ret_reg);
 
-    int nargs = countParams(t->Mentry->paramlist) + 1;    // + self
-    tmp = getReg();
+    int nargs = countParams(t->Mentry->paramlist) + 2;    // + self
+    int tmp = getReg();
     for(i = 0; i < nargs; i++) {
         fprintf(target_file, "POP R%d\n", tmp);
     }
@@ -461,6 +478,40 @@ int genMethodCall(tnode* t, FILE* target_file) {
     }
 
     return ret_reg;
+}
+
+/* Assignment between class variables copies both words of the pair */
+void genClassAssignment(tnode* t, FILE* target_file) {
+    tnode* r = t->right;
+    int la = getLValueAddr(t->left, target_file);
+
+    if(r->nodetype == NEW_NODE) {
+        int p = codeGen(r, target_file);                  // fresh 8-word block
+        fprintf(target_file, "MOV [R%d], R%d\n", la, p);
+        fprintf(target_file, "MOV R%d, %d\n", p, vftBase(r->val));
+        fprintf(target_file, "ADD R%d, 1\n", la);
+        fprintf(target_file, "MOV [R%d], R%d\n", la, p);
+        freeReg();
+    } else if(r->nodetype == CONSTANT) {                  // null
+        int z = getReg();
+        fprintf(target_file, "MOV R%d, 0\n", z);
+        fprintf(target_file, "MOV [R%d], R%d\n", la, z);
+        fprintf(target_file, "ADD R%d, 1\n", la);
+        fprintf(target_file, "MOV [R%d], R%d\n", la, z);
+        freeReg();
+    } else {
+        int ra = getVarAddressReg(r, target_file);
+        int v = getReg();
+        fprintf(target_file, "MOV R%d, [R%d]\n", v, ra);
+        fprintf(target_file, "MOV [R%d], R%d\n", la, v);
+        fprintf(target_file, "ADD R%d, 1\n", la);
+        fprintf(target_file, "ADD R%d, 1\n", ra);
+        fprintf(target_file, "MOV R%d, [R%d]\n", v, ra);
+        fprintf(target_file, "MOV [R%d], R%d\n", la, v);
+        freeReg();
+        freeReg();
+    }
+    freeReg();
 }
 
 /* Calls a library function through the ABI: CALL 0 with the function code, three arguments and an
@@ -672,6 +723,11 @@ int codeGen(tnode *t, FILE *target_file) {
         return -1;
     }
 
+    if (t->nodetype == ASSIGNMENT && isClassType(t->left->type)) {
+        genClassAssignment(t, target_file);
+        return -1;
+    }
+
     if (t->nodetype == ASSIGNMENT) {
         int right_reg = codeGen(t->right, target_file);
         int addr_reg = getLValueAddr(t->left, target_file);
@@ -824,7 +880,16 @@ int codeGen(tnode *t, FILE *target_file) {
 /* Header + code that sets up the stack, calls main and exits.
    Emitted once the global declarations are processed. */
 void genStartup(FILE* fp) {
+    int i;
+    Method* m;
     fprintf(fp, "0\n2056\n0\n0\n0\n0\n0\n0\n");
+    /* virtual function tables: entry p of a class holds the label of its method at position p */
+    for(i = 0; i < CCount(); i++) {
+        for(m = Class_Entry(CLASS_TYPE_BASE + i)->methods; m != NULL; m = m->next) {
+            fprintf(fp, "MOV R0, F%d\n", m->flabel);
+            fprintf(fp, "MOV [%d], R0\n", vftBase(CLASS_TYPE_BASE + i) + m->position);
+        }
+    }
     fprintf(fp, "MOV SP, %d\n", get_stack_pointer());
     fprintf(fp, "MOV BP, SP\n");
     fprintf(fp, "PUSH R0\n");          // space for main's return value

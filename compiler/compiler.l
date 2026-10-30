@@ -44,6 +44,7 @@
 "free"      {return FREE;}
 "initialize" {return INITIALIZE;}
 "class"     {return CLASS;}
+"extends"   {return EXTENDS;}
 "endclass"  {return ENDCLASS;}
 "new"       {return NEW;}
 "delete"    {return DELETE;}

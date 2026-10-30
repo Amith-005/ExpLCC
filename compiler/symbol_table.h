@@ -53,7 +53,8 @@ typedef struct Method {
     int type;                 // return type
     Paramstruct* paramlist;   // formal parameters (without the implicit self)
     int flabel;               // function label number: F<flabel>
-    int position;             // index in the class's method list
+    int position;             // index in the method list = index in the virtual function table
+    int owner;                // class that declared (or last overrode) the method
     int defined;              // 1 once the method definition has been seen
     struct Method* next;
 } Method;
@@ -62,11 +63,11 @@ typedef struct Method {
 typedef struct Classtable {
     char* name;
     int code;
-    int nfields;
+    int nfields;                 // words used by member fields (class-typed fields take 2 words)
     Field* fields;
     int nmethods;
     Method* methods;
-    struct Classtable* parent;   // always NULL in this stage
+    struct Classtable* parent;   // NULL if the class extends nothing
 } Classtable;
 
 /* Global symbol table: global variables and functions */
@@ -123,12 +124,16 @@ const char* typeName(int type);
 void print_type_table();
 
 /* Class table */
-int CInstall(char* name);                          // class type code, -1 if the name is already a type/class
+int CInstall(char* name, int parent);              // class type code, -1 if the name is already a type/class; parent: class type code or -1
+int CCount();
+int isSubclass(int sub, int sup);                  // 1 if sub is sup or a descendent of sup
+void reserveVFT();                                 // reserve 8 words per class below the global variables
 int CLookup(char* name);                           // class type code, -1 if undefined
 int Class_Finstall(int code, char* name, int type);  // 0 ok, 1 duplicate field, 2 too many fields
-Method* Class_Minstall(int code, char* name, int type, Paramstruct* params); // NULL on duplicate/too many
+int Class_Minstall(int code, char* name, int type, Paramstruct* params); // 0 ok, 1 duplicate/clash with a field, 2 too many methods, 3 override with a different signature
 Field* Class_Flookup(int code, char* name);
 Method* Class_Mlookup(int code, char* name);
+Method* Class_MlookupSig(int code, char* name, Paramstruct* params);   // exact parameter types
 Classtable* Class_Entry(int code);
 int newFunctionLabel();
 void print_class_table();

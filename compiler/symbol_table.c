@@ -186,7 +186,7 @@ int LInstallParams(Paramstruct* params, int first_binding) {
 }
 
 int LInstallSelf(int class_type) {
-    return LAppend("self", class_type, -3);
+    return LAppend("self", class_type, -4);   // 2 words: member field pointer at BP-4, VFT pointer at BP-3
 }
 
 /* Local variable i (1-based) is at BP+i */
@@ -310,7 +310,26 @@ int CLookup(char* name) {
     return -1;
 }
 
-int CInstall(char* name) {
+int CCount() {
+    return ccount;
+}
+
+int isSubclass(int sub, int sup) {
+    Classtable* c = Class_Entry(sub);
+    while(c != NULL) {
+        if(c->code == sup) return 1;
+        c = c->parent;
+    }
+    return 0;
+}
+
+void reserveVFT() {
+    if(bind_start == 4096) bind_start = 4096 + 8 * ccount;
+}
+
+/* A descendent starts as a copy of its parent: same fields (same offsets) and same methods (same
+   positions and labels). Overriding a method later gives that entry a new label. */
+int CInstall(char* name, int parent) {
     if(TLookup(name) >= 0 || CLookup(name) >= 0 || ccount >= MAX_CLASSES) return -1;
     Classtable* c = (Classtable*) malloc(sizeof(Classtable));
     c->name = strdup(name);
@@ -320,6 +339,30 @@ int CInstall(char* name) {
     c->nmethods = 0;
     c->methods = NULL;
     c->parent = NULL;
+    if(parent >= 0) {
+        Classtable* pc = Class_Entry(parent);
+        Field* f;
+        Method* m;
+        Field* lastf = NULL;
+        Method* lastm = NULL;
+        c->parent = pc;
+        for(f = pc->fields; f != NULL; f = f->next) {
+            Field* nf = (Field*) malloc(sizeof(Field));
+            *nf = *f;
+            nf->next = NULL;
+            if(lastf == NULL) c->fields = nf; else lastf->next = nf;
+            lastf = nf;
+        }
+        c->nfields = pc->nfields;
+        for(m = pc->methods; m != NULL; m = m->next) {
+            Method* nm = (Method*) malloc(sizeof(Method));
+            *nm = *m;
+            nm->next = NULL;
+            if(lastm == NULL) c->methods = nm; else lastm->next = nm;
+            lastm = nm;
+        }
+        c->nmethods = pc->nmethods;
+    }
     ctable[ccount++] = c;
     return c->code;
 }
@@ -352,23 +395,62 @@ int Class_Finstall(int code, char* name, int type) {
         if(strcmp(f->name, name) == 0) return 1;
         last = f;
     }
-    if(c->nfields >= MAX_FIELDS) return 2;
+    int size = isClassType(type) ? 2 : 1;      // a class variable is a pair [field pointer, VFT pointer]
+    if(Class_Mlookup(code, name) != NULL) return 1;
+    if(c->nfields + size > MAX_FIELDS) return 2;
     f = (Field*) malloc(sizeof(Field));
     f->name = strdup(name);
     f->type = type;
-    f->index = c->nfields++;
+    f->index = c->nfields;
+    c->nfields += size;
     f->next = NULL;
     if(last == NULL) c->fields = f; else last->next = f;
     return 0;
 }
 
-/* Only one method per name is allowed (no overloading); a method name may not clash with a field */
-Method* Class_Minstall(int code, char* name, int type, Paramstruct* params) {
+static int sameSignature(Paramstruct* a, Paramstruct* b);
+
+Method* Class_MlookupSig(int code, char* name, Paramstruct* params) {
     Classtable* c = Class_Entry(code);
     Method* m;
+    if(c == NULL) return NULL;
+    for(m = c->methods; m != NULL; m = m->next) {
+        if(strcmp(m->name, name) == 0 && sameSignature(m->paramlist, params)) return m;
+    }
+    return NULL;
+}
+
+static int sameSignature(Paramstruct* a, Paramstruct* b) {
+    while(a != NULL && b != NULL) {
+        if(a->type != b->type) return 0;
+        a = a->next;
+        b = b->next;
+    }
+    return a == NULL && b == NULL;
+}
+
+/* Only one method per name is allowed (no overloading). A method with the name of an inherited method
+   overrides it: it keeps the position, must keep the signature, and gets a new label. */
+int Class_Minstall(int code, char* name, int type, Paramstruct* params) {
+    Classtable* c = Class_Entry(code);
+    Method* m = Class_MlookupSig(code, name, params);
     Method* last = NULL;
-    if(Class_Mlookup(code, name) != NULL || Class_Flookup(code, name) != NULL) return NULL;
-    if(c->nmethods >= MAX_METHODS) return NULL;
+    if(Class_Flookup(code, name) != NULL) return 1;
+    /* a name declared in this very class may not be repeated, whatever the signature */
+    for(last = c->methods; last != NULL; last = last->next) {
+        if(last->owner == code && strcmp(last->name, name) == 0) return 1;
+    }
+    last = NULL;
+    if(m != NULL) {
+        /* same name and signature as an inherited method: an override, so the return type must agree */
+        if(m->type != type) return 3;
+        m->paramlist = params;
+        m->flabel = newFunctionLabel();
+        m->defined = 0;
+        m->owner = code;
+        return 0;
+    }
+    if(c->nmethods >= MAX_METHODS) return 2;
     for(m = c->methods; m != NULL; m = m->next) last = m;
     m = (Method*) malloc(sizeof(Method));
     m->name = strdup(name);
@@ -377,9 +459,10 @@ Method* Class_Minstall(int code, char* name, int type, Paramstruct* params) {
     m->flabel = newFunctionLabel();
     m->position = c->nmethods++;
     m->defined = 0;
+    m->owner = code;
     m->next = NULL;
     if(last == NULL) c->methods = m; else last->next = m;
-    return m;
+    return 0;
 }
 
 void print_class_table() {
@@ -388,12 +471,12 @@ void print_class_table() {
     Method* m;
     printf("---- Class Table ----\n");
     for(i = 0; i < ccount; i++) {
-        printf("%s (code %d, %d fields, %d methods, parent: NULL)\n", ctable[i]->name, ctable[i]->code, ctable[i]->nfields, ctable[i]->nmethods);
+        printf("%s (code %d, %d field words, %d methods, parent: %s)\n", ctable[i]->name, ctable[i]->code, ctable[i]->nfields, ctable[i]->nmethods, ctable[i]->parent ? ctable[i]->parent->name : "NULL");
         for(f = ctable[i]->fields; f != NULL; f = f->next) {
             printf("  field  %s:%s@%d\n", f->name, typeName(f->type), f->index);
         }
         for(m = ctable[i]->methods; m != NULL; m = m->next) {
-            printf("  method %s:%s position %d label F%d (", m->name, typeName(m->type), m->position, m->flabel);
+            printf("  method %s:%s position %d label F%d%s (", m->name, typeName(m->type), m->position, m->flabel, m->owner == ctable[i]->code ? "" : " inherited");
             Paramstruct* p = m->paramlist;
             while(p != NULL) {
                 printf("%s %s%s", typeName(p->type), p->name, p->next ? ", " : "");
