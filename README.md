@@ -2,9 +2,9 @@
 
 **ExpLCC** is a stage-wise compiler for the **Experimental Programming Language (ExpL)**, implemented in **C using Flex and Bison/YACC**, and targeting the **Experimental String Machine (XSM)**.
 
-The compiler is developed incrementally, with each stage extending the previous implementation. The Git history preserves this evolution from a basic arithmetic-expression compiler to a compiler supporting variables, control flow, symbol tables, arrays, pointers, functions, recursion, local scope, user-defined types, dynamic memory management, classes, objects, and methods.
+The compiler is developed incrementally, with each stage extending the previous implementation. The Git history preserves this evolution from a basic arithmetic-expression compiler to a compiler supporting variables, control flow, symbol tables, arrays, pointers, functions, recursion, local scope, user-defined types, dynamic memory management, classes, objects, inheritance, method overriding, and runtime polymorphism.
 
-The current implementation covers **Stage 1 through Stage 7**.
+The current implementation covers **Stage 1 through Stage 8**.
 
 ---
 
@@ -23,6 +23,11 @@ The current implementation covers **Stage 1 through Stage 7**.
 - User-defined types
 - Dynamic heap allocation
 - Classes, objects, and methods
+- Class inheritance
+- Method overriding
+- Virtual Function Tables (VFT)
+- Dynamic method dispatch
+- Runtime polymorphism
 - XSM target-code generation
 
 ---
@@ -345,6 +350,76 @@ Stage 7 introduces the basic object model for ExpL by combining class metadata, 
 
 ---
 
+## Stage 8 — Inheritance, Overriding and Dynamic Dispatch
+
+Stage 8 extends the object-oriented compiler with **class inheritance and runtime polymorphism**.
+
+### Newly Implemented
+
+- Class inheritance using `extends`
+- Parent-class relationships in the Class Table
+- Inherited fields and methods
+- Preservation of inherited field offsets and method positions
+- Subclass checking
+- Parent/child class type compatibility
+- Assignment of child objects to parent references
+- Validation against invalid downcasts
+- Method overriding with signature validation
+- Inherited method lookup
+- Virtual Function Tables (**VFT**)
+- Per-class VFT construction
+- Reuse of VFT slots for overridden methods
+- VFT initialization during code generation
+- Runtime dynamic method dispatch
+- Runtime polymorphism
+- Semantic checks for invalid class-member access
+- Rejection of unsupported method overloading with the same method name
+
+Example:
+
+```c
+class
+Rectangle
+{
+    decl
+        int length;
+        int breadth;
+        int set_dimensions();
+        int area();
+    enddecl
+
+    int area()
+    {
+        begin
+            return self.length * self.breadth;
+        end
+    }
+}
+
+Square extends Rectangle
+{
+    decl
+        int set_dimensions();
+    enddecl
+
+    int set_dimensions()
+    {
+        begin
+            read(self.length);
+            self.breadth = self.length;
+            return 0;
+        end
+    }
+}
+endclass
+```
+
+Here, `Square` inherits the fields and methods of `Rectangle` and overrides `set_dimensions()`.
+
+Stage 8 adds inheritance, overriding, virtual function tables, and runtime polymorphism.
+
+---
+
 # Compilation Pipeline
 
 ```text
@@ -643,8 +718,11 @@ User-Defined Types + Dynamic Memory Management
         ↓
 Stage 7
 Classes + Objects + Methods
+        ↓
+Stage 8
+Inheritance + Overriding + VFT + Dynamic Dispatch
 ```
 
 Each stage builds upon the previous implementation rather than existing as an independent compiler copy.
 
-The Git commit history therefore provides a direct record of the compiler's development from Stage 1 through Stage 7.
+The Git commit history therefore provides a direct record of the compiler's development from Stage 1 through Stage 8.
